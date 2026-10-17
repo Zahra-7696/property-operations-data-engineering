@@ -213,3 +213,137 @@ gold reporting marts
 
 Those are added incrementally in the following stages so each responsibility
 remains testable and explainable.
+
+---
+
+## Stage 4 — Technical visit-event validation
+
+### Scope
+
+Stage 4 parses the raw JSONL lines landed in Stage 3 and separates technically
+valid source events from technically invalid lines.
+
+This stage follows the field-level technical rules in the supplied data
+dictionary. It deliberately does **not** perform business-quality checks such as
+unknown property/contractor references or `ended_at < started_at`; those remain a
+separate later stage.
+
+### `validated_visit_events`
+
+**Grain:** one technically valid physical event-delivery line.
+
+Primary key:
+
+```text
+(batch_id, line_number)
+```
+
+Important columns:
+
+- `event_id`
+- `visit_id`
+- `source_version`
+- `operation`
+- `updated_at`
+- complete upsert payload fields where applicable
+- `raw_payload`
+
+Repeated `event_id` values are intentionally allowed here. Deduplication and
+per-visit version precedence are Stage 5 concerns.
+
+### `visit_event_rejects`
+
+**Grain:** one technically invalid physical input line.
+
+Primary key:
+
+```text
+(batch_id, line_number)
+```
+
+Important columns:
+
+- original `raw_payload`
+- `reason_codes`
+- human-readable `rejection_reason`
+- `rejected_at`
+
+### Technical validation rules
+
+The validator checks:
+
+- JSON parses to an object.
+- `event_id` is a nonempty string.
+- `visit_id` is a nonempty string.
+- `source_version` is a positive integer and not a boolean.
+- `operation` is `upsert` or `delete`.
+- `updated_at` is timezone-aware ISO 8601.
+- upserts contain nonempty `property_id`, `contractor_id`, `visitor_id`.
+- upserts contain timezone-aware `started_at`.
+- `ended_at` exists for upserts and is null or timezone-aware.
+- deletes omit visit payload fields.
+
+Unknown references and invalid business duration are not technical rejects.
+
+### Expected Stage 4 counts
+
+```text
+1,997 raw input lines
+1,979 technically valid event-delivery lines
+18 technically invalid lines
+```
+
+The 18 rejects comprise:
+
+```text
+6 malformed JSON lines
+6 incomplete upserts
+6 delete events with invalid updated_at timestamps
+```
+
+
+
+### Cumulative engineering/audit report
+
+Stage 4 also introduces a generated text report:
+
+```text
+reports/Report.txt
+```
+
+This file is **not another data-model layer**. It is a human-readable engineering
+audit artifact generated from the source manifests and DuckDB state.
+
+At Stage 4 it contains cumulative evidence for:
+
+- Stage 1 source integrity;
+- Stage 2 typed reference counts;
+- Stage 3 batch landing and raw-line counts;
+- Stage 4 valid/invalid counts;
+- Stage 4 rejection categories;
+- every rejected source record with source file, line number, reason and raw text.
+
+The report uses fixed-width ASCII tables for compact console/text readability.
+Later stages extend this same report with duplicate, versioning, business-quality
+and modelling evidence rather than creating separate stage-specific reports.
+
+### Replay behaviour
+
+Once a batch has `validated_at`, rerunning technical validation is a strict
+no-op for that batch.
+
+### Current model boundary after Stage 4
+
+The database now contains:
+
+```text
+Static/reference typed source tables
+Raw visit landing / audit tables
+Technically validated visit layer
+    validated_visit_events
+    visit_event_rejects
+```
+
+It does not yet contain deduplicated event history, current visit state,
+business-quality issues, management intervals, analytical facts or gold marts.
+

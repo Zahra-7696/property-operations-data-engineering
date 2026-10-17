@@ -1,0 +1,219 @@
+PROPERTY OPERATIONS - CUMULATIVE PIPELINE AUDIT REPORT
+================================================================================================================
+Purpose: engineering evidence for ingestion, validation, quality and model-processing decisions.
+This is separate from the final business-facing HTML operations report created later in the project.
+
+STAGE 1 - SOURCE INTEGRITY
+----------------------------------------------------------------------------------------------------------------
+Purpose: verify the supplied raw files remain byte-for-byte unchanged.
+
++--------+------------------------------------------------------+--------+------------+--------------+
+| Status | Source file                                          | Rows   | Rows match | SHA256 match |
++--------+------------------------------------------------------+--------+------------+--------------+
+| PASS   | data/companies.csv                                   | 3      | Yes        | Yes          |
++--------+------------------------------------------------------+--------+------------+--------------+
+| PASS   | data/contractors.csv                                 | 8      | Yes        | Yes          |
++--------+------------------------------------------------------+--------+------------+--------------+
+| PASS   | data/incidents.csv                                   | 247    | Yes        | Yes          |
++--------+------------------------------------------------------+--------+------------+--------------+
+| PASS   | data/properties.csv                                  | 24     | Yes        | Yes          |
++--------+------------------------------------------------------+--------+------------+--------------+
+| PASS   | data/property_management.csv                         | 62     | Yes        | Yes          |
++--------+------------------------------------------------------+--------+------------+--------------+
+| PASS   | data/report_weeks.csv                                | 6      | Yes        | Yes          |
++--------+------------------------------------------------------+--------+------------+--------------+
+| PASS   | data/visit_changes/batch_01.jsonl                    | 381    | Yes        | Yes          |
++--------+------------------------------------------------------+--------+------------+--------------+
+| PASS   | data/visit_changes/batch_02.jsonl                    | 323    | Yes        | Yes          |
++--------+------------------------------------------------------+--------+------------+--------------+
+| PASS   | data/visit_changes/batch_03.jsonl                    | 323    | Yes        | Yes          |
++--------+------------------------------------------------------+--------+------------+--------------+
+| PASS   | data/visit_changes/batch_04.jsonl                    | 323    | Yes        | Yes          |
++--------+------------------------------------------------------+--------+------------+--------------+
+| PASS   | data/visit_changes/batch_05.jsonl                    | 323    | Yes        | Yes          |
++--------+------------------------------------------------------+--------+------------+--------------+
+| PASS   | data/visit_changes/batch_06.jsonl                    | 324    | Yes        | Yes          |
++--------+------------------------------------------------------+--------+------------+--------------+
+
+Summary: 12/12 supplied files passed row-count and SHA256 checks.
+
+STAGE 2 - TYPED REFERENCE LAYER
+----------------------------------------------------------------------------------------------------------------
+Purpose: load the static/reference CSV sources into typed DuckDB tables.
+
++------------------------------------+----------+
+| Table                              | Rows     |
++------------------------------------+----------+
+| src_companies                      | 3        |
++------------------------------------+----------+
+| src_contractors                    | 8        |
++------------------------------------+----------+
+| src_properties                     | 24       |
++------------------------------------+----------+
+| src_property_management            | 62       |
++------------------------------------+----------+
+| src_incidents                      | 247      |
++------------------------------------+----------+
+| src_report_weeks                   | 6        |
++------------------------------------+----------+
+
+Reference relationship checks: PASS
+Reference load is transactional / rollback-safe.
+
+STAGE 3 - RAW VISIT BATCH LANDING
+----------------------------------------------------------------------------------------------------------------
+Purpose: preserve every physical JSONL line in manifest order before parsing.
+
++----------+-------+------------+--------+-----------+----------+----------------------------------------+
+| Batch    | Order | Snapshot   | Lines  | Status    | Attempts | Source file                            |
++----------+-------+------------+--------+-----------+----------+----------------------------------------+
+| batch_01 | 1     | 2026-04-13 | 381    | landed    | 1        | data/visit_changes/batch_01.jsonl      |
++----------+-------+------------+--------+-----------+----------+----------------------------------------+
+| batch_02 | 2     | 2026-04-14 | 323    | landed    | 1        | data/visit_changes/batch_02.jsonl      |
++----------+-------+------------+--------+-----------+----------+----------------------------------------+
+| batch_03 | 3     | 2026-04-15 | 323    | landed    | 1        | data/visit_changes/batch_03.jsonl      |
++----------+-------+------------+--------+-----------+----------+----------------------------------------+
+| batch_04 | 4     | 2026-04-16 | 323    | landed    | 1        | data/visit_changes/batch_04.jsonl      |
++----------+-------+------------+--------+-----------+----------+----------------------------------------+
+| batch_05 | 5     | 2026-04-17 | 323    | landed    | 1        | data/visit_changes/batch_05.jsonl      |
++----------+-------+------------+--------+-----------+----------+----------------------------------------+
+| batch_06 | 6     | 2026-04-18 | 324    | landed    | 1        | data/visit_changes/batch_06.jsonl      |
++----------+-------+------------+--------+-----------+----------+----------------------------------------+
+
+Raw physical visit lines preserved: 1997
+Replay behavior: already-landed batches are a no-op.
+Restart behavior: failed batch landing rolls back partial raw rows.
+
+STAGE 4 - TECHNICAL VISIT-EVENT VALIDATION
+----------------------------------------------------------------------------------------------------------------
+Purpose: separate technically valid event deliveries from malformed or incomplete source lines while preserving reject evidence.
+
+Per-batch validation summary:
++----------+---------+---------+--------------------------------------------+
+| Batch    | Valid   | Invalid | Source file                                |
++----------+---------+---------+--------------------------------------------+
+| batch_01 | 378     | 3       | data/visit_changes/batch_01.jsonl          |
++----------+---------+---------+--------------------------------------------+
+| batch_02 | 320     | 3       | data/visit_changes/batch_02.jsonl          |
++----------+---------+---------+--------------------------------------------+
+| batch_03 | 320     | 3       | data/visit_changes/batch_03.jsonl          |
++----------+---------+---------+--------------------------------------------+
+| batch_04 | 320     | 3       | data/visit_changes/batch_04.jsonl          |
++----------+---------+---------+--------------------------------------------+
+| batch_05 | 320     | 3       | data/visit_changes/batch_05.jsonl          |
++----------+---------+---------+--------------------------------------------+
+| batch_06 | 321     | 3       | data/visit_changes/batch_06.jsonl          |
++----------+---------+---------+--------------------------------------------+
+
+Overall totals:
+  Technically valid event-delivery lines   : 1979
+  Technically invalid event-delivery lines : 18
+
+Reject-category summary:
++------------------------+---------+------------------------------------------------------------+
+| Reject category        | Count   | Meaning                                                    |
++------------------------+---------+------------------------------------------------------------+
+| Incomplete upsert      | 6       | Required upsert fields are missing or invalid.             |
++------------------------+---------+------------------------------------------------------------+
+| Invalid timestamp      | 6       | updated_at is not a timezone-aware ISO 8601 timestamp.     |
++------------------------+---------+------------------------------------------------------------+
+| Malformed JSON         | 6       | JSON syntax is incomplete / cannot be parsed.              |
++------------------------+---------+------------------------------------------------------------+
+
+Rejected-record summary:
++----+----------+-------+--------------+--------------------+--------------------------------------------------+
+| #  | Batch    | Line  | Event ID     | Category           | Reason                                           |
++----+----------+-------+--------------+--------------------+--------------------------------------------------+
+| 1  | batch_01 | 379   | TRUNCATED    | Malformed JSON     | JSON syntax is incomplete / cannot be parsed.    |
++----+----------+-------+--------------+--------------------+--------------------------------------------------+
+| 2  | batch_01 | 380   | BAD_1        | Incomplete upsert  | Required upsert fields are missing or invalid.   |
++----+----------+-------+--------------+--------------------+--------------------------------------------------+
+| 3  | batch_01 | 381   | BAD_TIME_1   | Invalid timestamp  | updated_at is not a timezone-aware ISO 8601      |
+|    |          |       |              |                    | timestamp.                                       |
++----+----------+-------+--------------+--------------------+--------------------------------------------------+
+| 4  | batch_02 | 321   | TRUNCATED    | Malformed JSON     | JSON syntax is incomplete / cannot be parsed.    |
++----+----------+-------+--------------+--------------------+--------------------------------------------------+
+| 5  | batch_02 | 322   | BAD_2        | Incomplete upsert  | Required upsert fields are missing or invalid.   |
++----+----------+-------+--------------+--------------------+--------------------------------------------------+
+| 6  | batch_02 | 323   | BAD_TIME_2   | Invalid timestamp  | updated_at is not a timezone-aware ISO 8601      |
+|    |          |       |              |                    | timestamp.                                       |
++----+----------+-------+--------------+--------------------+--------------------------------------------------+
+| 7  | batch_03 | 321   | TRUNCATED    | Malformed JSON     | JSON syntax is incomplete / cannot be parsed.    |
++----+----------+-------+--------------+--------------------+--------------------------------------------------+
+| 8  | batch_03 | 322   | BAD_3        | Incomplete upsert  | Required upsert fields are missing or invalid.   |
++----+----------+-------+--------------+--------------------+--------------------------------------------------+
+| 9  | batch_03 | 323   | BAD_TIME_3   | Invalid timestamp  | updated_at is not a timezone-aware ISO 8601      |
+|    |          |       |              |                    | timestamp.                                       |
++----+----------+-------+--------------+--------------------+--------------------------------------------------+
+| 10 | batch_04 | 321   | TRUNCATED    | Malformed JSON     | JSON syntax is incomplete / cannot be parsed.    |
++----+----------+-------+--------------+--------------------+--------------------------------------------------+
+| 11 | batch_04 | 322   | BAD_4        | Incomplete upsert  | Required upsert fields are missing or invalid.   |
++----+----------+-------+--------------+--------------------+--------------------------------------------------+
+| 12 | batch_04 | 323   | BAD_TIME_4   | Invalid timestamp  | updated_at is not a timezone-aware ISO 8601      |
+|    |          |       |              |                    | timestamp.                                       |
++----+----------+-------+--------------+--------------------+--------------------------------------------------+
+| 13 | batch_05 | 321   | TRUNCATED    | Malformed JSON     | JSON syntax is incomplete / cannot be parsed.    |
++----+----------+-------+--------------+--------------------+--------------------------------------------------+
+| 14 | batch_05 | 322   | BAD_5        | Incomplete upsert  | Required upsert fields are missing or invalid.   |
++----+----------+-------+--------------+--------------------+--------------------------------------------------+
+| 15 | batch_05 | 323   | BAD_TIME_5   | Invalid timestamp  | updated_at is not a timezone-aware ISO 8601      |
+|    |          |       |              |                    | timestamp.                                       |
++----+----------+-------+--------------+--------------------+--------------------------------------------------+
+| 16 | batch_06 | 322   | TRUNCATED    | Malformed JSON     | JSON syntax is incomplete / cannot be parsed.    |
++----+----------+-------+--------------+--------------------+--------------------------------------------------+
+| 17 | batch_06 | 323   | BAD_6        | Incomplete upsert  | Required upsert fields are missing or invalid.   |
++----+----------+-------+--------------+--------------------+--------------------------------------------------+
+| 18 | batch_06 | 324   | BAD_TIME_6   | Invalid timestamp  | updated_at is not a timezone-aware ISO 8601      |
+|    |          |       |              |                    | timestamp.                                       |
++----+----------+-------+--------------+--------------------+--------------------------------------------------+
+
+Detailed source evidence:
+Reference format is <source_file>:<line_number>. The raw source files remain unchanged.
++----+-----------------------------------------+----------------------------------------+--------------------------------------------------------------------------+
+| #  | Source reference                        | Reason codes                           | Raw source record                                                        |
++----+-----------------------------------------+----------------------------------------+--------------------------------------------------------------------------+
+| 1  | data/visit_changes/batch_01.jsonl:379   | malformed_json                         | {"event_id":"TRUNCATED",                                                 |
++----+-----------------------------------------+----------------------------------------+--------------------------------------------------------------------------+
+| 2  | data/visit_changes/batch_01.jsonl:380   | invalid_visit_id,invalid_source_versio | {"event_id": "BAD_1", "operation": "upsert"}                             |
++----+-----------------------------------------+----------------------------------------+--------------------------------------------------------------------------+
+| 3  | data/visit_changes/batch_01.jsonl:381   | invalid_updated_at                     | {"event_id": "BAD_TIME_1", "visit_id": "BAD_VISIT", "source_version": 1, |
+|    |                                         |                                        | "operation": "delete", "updated_at": "not-a-timestamp"}                  |
++----+-----------------------------------------+----------------------------------------+--------------------------------------------------------------------------+
+| 4  | data/visit_changes/batch_02.jsonl:321   | malformed_json                         | {"event_id":"TRUNCATED",                                                 |
++----+-----------------------------------------+----------------------------------------+--------------------------------------------------------------------------+
+| 5  | data/visit_changes/batch_02.jsonl:322   | invalid_visit_id,invalid_source_versio | {"event_id": "BAD_2", "operation": "upsert"}                             |
++----+-----------------------------------------+----------------------------------------+--------------------------------------------------------------------------+
+| 6  | data/visit_changes/batch_02.jsonl:323   | invalid_updated_at                     | {"event_id": "BAD_TIME_2", "visit_id": "BAD_VISIT", "source_version": 1, |
+|    |                                         |                                        | "operation": "delete", "updated_at": "not-a-timestamp"}                  |
++----+-----------------------------------------+----------------------------------------+--------------------------------------------------------------------------+
+| 7  | data/visit_changes/batch_03.jsonl:321   | malformed_json                         | {"event_id":"TRUNCATED",                                                 |
++----+-----------------------------------------+----------------------------------------+--------------------------------------------------------------------------+
+| 8  | data/visit_changes/batch_03.jsonl:322   | invalid_visit_id,invalid_source_versio | {"event_id": "BAD_3", "operation": "upsert"}                             |
++----+-----------------------------------------+----------------------------------------+--------------------------------------------------------------------------+
+| 9  | data/visit_changes/batch_03.jsonl:323   | invalid_updated_at                     | {"event_id": "BAD_TIME_3", "visit_id": "BAD_VISIT", "source_version": 1, |
+|    |                                         |                                        | "operation": "delete", "updated_at": "not-a-timestamp"}                  |
++----+-----------------------------------------+----------------------------------------+--------------------------------------------------------------------------+
+| 10 | data/visit_changes/batch_04.jsonl:321   | malformed_json                         | {"event_id":"TRUNCATED",                                                 |
++----+-----------------------------------------+----------------------------------------+--------------------------------------------------------------------------+
+| 11 | data/visit_changes/batch_04.jsonl:322   | invalid_visit_id,invalid_source_versio | {"event_id": "BAD_4", "operation": "upsert"}                             |
++----+-----------------------------------------+----------------------------------------+--------------------------------------------------------------------------+
+| 12 | data/visit_changes/batch_04.jsonl:323   | invalid_updated_at                     | {"event_id": "BAD_TIME_4", "visit_id": "BAD_VISIT", "source_version": 1, |
+|    |                                         |                                        | "operation": "delete", "updated_at": "not-a-timestamp"}                  |
++----+-----------------------------------------+----------------------------------------+--------------------------------------------------------------------------+
+| 13 | data/visit_changes/batch_05.jsonl:321   | malformed_json                         | {"event_id":"TRUNCATED",                                                 |
++----+-----------------------------------------+----------------------------------------+--------------------------------------------------------------------------+
+| 14 | data/visit_changes/batch_05.jsonl:322   | invalid_visit_id,invalid_source_versio | {"event_id": "BAD_5", "operation": "upsert"}                             |
++----+-----------------------------------------+----------------------------------------+--------------------------------------------------------------------------+
+| 15 | data/visit_changes/batch_05.jsonl:323   | invalid_updated_at                     | {"event_id": "BAD_TIME_5", "visit_id": "BAD_VISIT", "source_version": 1, |
+|    |                                         |                                        | "operation": "delete", "updated_at": "not-a-timestamp"}                  |
++----+-----------------------------------------+----------------------------------------+--------------------------------------------------------------------------+
+| 16 | data/visit_changes/batch_06.jsonl:322   | malformed_json                         | {"event_id":"TRUNCATED",                                                 |
++----+-----------------------------------------+----------------------------------------+--------------------------------------------------------------------------+
+| 17 | data/visit_changes/batch_06.jsonl:323   | invalid_visit_id,invalid_source_versio | {"event_id": "BAD_6", "operation": "upsert"}                             |
++----+-----------------------------------------+----------------------------------------+--------------------------------------------------------------------------+
+| 18 | data/visit_changes/batch_06.jsonl:324   | invalid_updated_at                     | {"event_id": "BAD_TIME_6", "visit_id": "BAD_VISIT", "source_version": 1, |
+|    |                                         |                                        | "operation": "delete", "updated_at": "not-a-timestamp"}                  |
++----+-----------------------------------------+----------------------------------------+--------------------------------------------------------------------------+
+
+Validation replay behavior: already-validated batches are a no-op.
+Boundary: unknown business references and invalid visit duration are not Stage 4 technical rejects.

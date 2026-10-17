@@ -198,7 +198,7 @@ working correctly.
 | 1. Project setup and raw integrity | Preserve the supplied source exactly and establish a reproducible Python/Git project | `src/verify_sources.py`, dependencies, Git configuration | **Done** |
 | 2. Persistent source layer | Create DuckDB and load/validate the six static/reference CSV sources | `sql/schema.sql`, `src/database.py`, `src/load_reference_data.py` | **Done** |
 | 3. Visit batch ingestion | Read `manifest.json`, land all physical JSONL lines in order and record replay/restart-safe batch progress | `ingestion_batches`, `raw_visit_lines`, landing code/tests | **Done** |
-| 4. Technical validation | Record malformed or technically invalid source lines without stopping valid records | Reject/audit evidence | Not started |
+| 4. Technical validation | Parse landed lines, retain valid source events and record technical rejects with evidence | `validated_visit_events`, `visit_event_rejects` | **Done** |
 | 5. Versioning, duplicates and deletes | Make replay safe; handle repeated `event_id`, `source_version`, delete and reactivation rules | Event history and current visit state | Not started |
 | 6. Business data quality | Flag unknown references and invalid durations while preserving evidence | Quality-issue model | Not started |
 | 7. Management history | Convert observations into historical management intervals and current management | Historical/current management models | Not started |
@@ -230,13 +230,28 @@ working correctly.
 
 - [x] Confirm Stage 2 automated pytest checks pass from the project root (`11 passed`)
 
-### Current stage
+### Completed in Stage 3
 
-- [x] Run and confirm Stage 3 batch-landing checks locally
+- [x] Land all 6 manifest batches in order
+- [x] Preserve all 1,997 physical visit-change lines
+- [x] Confirm replay is a true no-op
+- [x] Confirm simulated batch failure rolls back and restarts safely
+- [x] Confirm full regression suite passes (`17 passed`)
+
+### Completed in Stage 4
+
+- [x] Parse all 1,997 landed visit-change lines
+- [x] Retain 1,979 technically valid event-delivery lines
+- [x] Preserve 18 technical rejects with batch, line, category, reason and raw evidence
+- [x] Generate cumulative `reports/Report.txt`
+- [x] Present Stage 4 results in readable fixed-width tables
+- [x] Confirm validation replay is a no-op
+- [x] Confirm Stage 4 tests pass (`12 passed`)
+- [x] Confirm full regression suite passes (`29 passed`)
 
 ### Next
 
-- [ ] Parse and technically validate visit events
+- [ ] Deduplicate repeated `event_id` deliveries and apply `source_version` precedence
 - [ ] Record technical rejects and loading counts
 - [ ] Implement idempotent replay and restart-safe batches
 - [ ] Maintain latest visit state using `source_version`
@@ -507,6 +522,118 @@ after technical validation, not silently mixed into raw landing.
 
 ---
 
+## Stage 4 — Technical visit-event validation
+
+### Aim
+
+Parse every landed JSONL line and separate technically valid visit-change events
+from technically invalid input while retaining evidence for every rejected line.
+
+This stage does **not** yet decide which event wins for a visit and does not check
+business references or business duration.
+
+### Why this stage exists
+
+The assignment requires technically invalid events to be recorded with batch ID,
+line number and an explanation while valid events continue to load.
+
+### New tables
+
+| Table | Grain | Purpose |
+| --- | --- | --- |
+| `validated_visit_events` | One technically valid physical event-delivery line | Typed source event ready for deduplication/version logic |
+| `visit_event_rejects` | One technically invalid physical input line | Original payload plus rejection codes and explanation |
+
+### Flow
+
+```text
+raw_visit_lines
+      |
+      v
+src/validate_visit_events.py
+      |
+      +----------------------+
+      |                      |
+      v                      v
+validated_visit_events   visit_event_rejects
+      |
+      +----> reports/Report.txt
+      |
+      v
+tests/test_visit_validation.py
+```
+
+### Files
+
+| File | Responsibility |
+| --- | --- |
+| `sql/schema.sql` | Adds technically validated-event and reject tables |
+| `src/validate_visit_events.py` | Implements technical JSON/event validation and prints reject evidence |
+| `src/audit_report.py` | Rebuilds the cumulative engineering/audit `reports/Report.txt` |
+| `tests/test_visit_validation.py` | Checks expected counts, rejection categories and replay |
+| `docs/DATA_MODEL.md` | Adds Stage 4 to the cumulative data-model documentation |
+
+### Run
+
+```powershell
+python -m src.validate_visit_events
+```
+
+Expected totals:
+
+```text
+Technically valid event lines:   1979
+Technically invalid event lines: 18
+```
+
+After the summary, the command prints the 18 rejected records in a compact ASCII table with:
+
+```text
+source file + line number
+batch ID
+reject category
+reason codes
+human-readable reason
+raw source line
+```
+
+The same evidence is written cumulatively to:
+
+```text
+reports/Report.txt
+```
+
+`Report.txt` uses fixed-width ASCII tables so it remains readable in PowerShell, GitHub and plain-text editors. It is the engineering/audit report. The later
+`reports/operations_report.html` is the separate business-facing report.
+
+Then:
+
+```powershell
+python -m pytest tests/test_visit_validation.py -q
+python -m pytest -q
+```
+
+Rerun:
+
+```powershell
+python -m src.validate_visit_events
+```
+
+The second validation run should show all batches as `skipped`.
+
+### Boundary
+
+Stage 4 answers:
+
+> Is this physical source line a technically valid visit-change event?
+
+Stage 5 answers:
+
+> Is it a repeated event delivery, which `source_version` wins for the visit, and
+> should the visit be upserted, deleted or reactivated?
+
+---
+
 ## How to run the project currently
 
 From the repository root:
@@ -519,6 +646,7 @@ cd D:\project\onside\Assignment
 python -m src.verify_sources
 python -m src.load_reference_data
 python -m src.land_visit_batches
+python -m src.validate_visit_events
 python -m pytest -q
 ```
 
@@ -528,7 +656,9 @@ At the current stage this:
 2. rebuilds and validates the typed reference layer;
 3. lands all six visit-change batches in manifest order;
 4. preserves all 1,997 physical JSONL lines;
-5. checks replay/restart behaviour through automated tests.
+5. technically validates landed visit-change lines;
+6. preserves all technical rejects with reasons;
+7. checks replay/restart/validation behaviour through automated tests.
 
 Later stages will add technical event validation, current-state modelling,
 analytics models and report generation. A final top-level pipeline command will
@@ -552,17 +682,22 @@ eventually rebuild the complete project from a fresh checkout.
 ├── docs/
 │   ├── ORIGINAL_ASSIGNMENT_BRIEF.md
 │   └── DATA_MODEL.md             # cumulative model documentation
+├── reports/
+│   └── Report.txt                # generated cumulative engineering/audit report
 ├── sql/
 │   └── schema.sql
 ├── src/
 │   ├── __init__.py
+│   ├── audit_report.py
 │   ├── database.py
 │   ├── land_visit_batches.py
 │   ├── load_reference_data.py
+│   ├── validate_visit_events.py
 │   └── verify_sources.py
 ├── tests/
 │   ├── test_batch_landing.py
-│   └── test_reference_data.py
+│   ├── test_reference_data.py
+│   └── test_visit_validation.py
 ├── .gitattributes
 ├── .gitignore
 ├── pytest.ini

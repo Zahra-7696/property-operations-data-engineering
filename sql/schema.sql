@@ -74,3 +74,36 @@ CREATE TABLE IF NOT EXISTS raw_visit_lines (
     line_sha256 VARCHAR NOT NULL,
     PRIMARY KEY (batch_id, line_number)
 );
+
+-- Technically validated visit-event layer.
+--
+-- `validated_visit_events` intentionally keeps repeated event deliveries.
+-- Global event-ID deduplication and per-visit version precedence are Stage 5 concerns.
+
+CREATE TABLE IF NOT EXISTS validated_visit_events (
+    batch_id VARCHAR NOT NULL,
+    line_number INTEGER NOT NULL CHECK (line_number > 0),
+    event_id VARCHAR NOT NULL,
+    visit_id VARCHAR NOT NULL,
+    source_version BIGINT NOT NULL CHECK (source_version > 0),
+    operation VARCHAR NOT NULL CHECK (operation IN ('upsert', 'delete')),
+    updated_at TIMESTAMPTZ NOT NULL,
+    property_id VARCHAR,
+    contractor_id VARCHAR,
+    visitor_id VARCHAR,
+    started_at TIMESTAMPTZ,
+    ended_at TIMESTAMPTZ,
+    raw_payload VARCHAR NOT NULL,
+    PRIMARY KEY (batch_id, line_number)
+);
+
+CREATE TABLE IF NOT EXISTS visit_event_rejects (
+    batch_id VARCHAR NOT NULL,
+    line_number INTEGER NOT NULL CHECK (line_number > 0),
+    raw_payload VARCHAR NOT NULL,
+    reason_codes VARCHAR NOT NULL,
+    rejection_reason VARCHAR NOT NULL,
+    rejected_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (batch_id, line_number)
+);
+
