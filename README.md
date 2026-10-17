@@ -128,6 +128,8 @@ audit trail or a discussion of scaling. Completing the core project well is suff
 
 ---
 
+---
+
 ## Candidate implementation
 
 ### Project approach
@@ -194,8 +196,8 @@ working correctly.
 | Stage | Aim | Main output | Status |
 | --- | --- | --- | --- |
 | 1. Project setup and raw integrity | Preserve the supplied source exactly and establish a reproducible Python/Git project | `src/verify_sources.py`, dependencies, Git configuration | **Done** |
-| 2. Persistent source layer | Create DuckDB and load/validate the six static/reference CSV sources | `sql/schema.sql`, `src/database.py`, `src/load_reference_data.py` | **Implementation done; tests being confirmed** |
-| 3. Visit batch ingestion | Read `manifest.json`, process the six JSONL batches in order and record batch progress | Batch audit tables and ingestion code | Not started |
+| 2. Persistent source layer | Create DuckDB and load/validate the six static/reference CSV sources | `sql/schema.sql`, `src/database.py`, `src/load_reference_data.py` | **Done** |
+| 3. Visit batch ingestion | Read `manifest.json`, land all physical JSONL lines in order and record replay/restart-safe batch progress | `ingestion_batches`, `raw_visit_lines`, landing code/tests | **In progress** |
 | 4. Technical validation | Record malformed or technically invalid source lines without stopping valid records | Reject/audit evidence | Not started |
 | 5. Versioning, duplicates and deletes | Make replay safe; handle repeated `event_id`, `source_version`, delete and reactivation rules | Event history and current visit state | Not started |
 | 6. Business data quality | Flag unknown references and invalid durations while preserving evidence | Quality-issue model | Not started |
@@ -224,13 +226,17 @@ working correctly.
 - [x] Validate reference relationships and incident severity domain
 - [x] Make reference-data reload transactional / rollback-safe
 
-### In progress
+### Completed in Stage 2
 
-- [ ] Confirm Stage 2 automated pytest checks pass from the project root
+- [x] Confirm Stage 2 automated pytest checks pass from the project root (`11 passed`)
+
+### Current stage
+
+- [ ] Run and confirm Stage 3 batch-landing checks locally
 
 ### Next
 
-- [ ] Implement visit batch ingestion
+- [ ] Parse and technically validate visit events
 - [ ] Record technical rejects and loading counts
 - [ ] Implement idempotent replay and restart-safe batches
 - [ ] Maintain latest visit state using `source_version`
@@ -241,6 +247,8 @@ working correctly.
 - [ ] Add the complete edge-case test suite
 - [ ] Add GitHub Actions CI
 - [ ] Document production-scale AWS/Snowflake evolution
+
+---
 
 ---
 
@@ -278,6 +286,8 @@ Expected final result:
 ```text
 SUCCESS: All supplied source files match DATASET_MANIFEST.json.
 ```
+
+---
 
 ---
 
@@ -383,6 +393,120 @@ commit, DuckDB rolls back instead of leaving a partially rebuilt reference layer
 
 ---
 
+---
+
+## Stage 3 — Manifest-driven visit batch landing
+
+### Aim
+
+Land the six visit-change files in the exact order declared by `manifest.json`
+while preserving every physical input line and recording durable batch progress.
+
+This stage intentionally **does not parse or clean JSON yet**. The source contains
+deliberately malformed lines, so the raw landing layer must retain those lines for
+the next technical-validation stage.
+
+### Why this stage exists
+
+The assignment requires:
+
+- initial processing in manifest order;
+- stable batch IDs and contents;
+- safe replay of an already processed batch;
+- batch progress and useful loading counts;
+- evidence of invalid source lines;
+- restart after failure without partial application.
+
+Stage 3 establishes the durable raw/audit foundation for those requirements.
+
+### New database tables
+
+| Table | Grain | Purpose |
+| --- | --- | --- |
+| `ingestion_batches` | One manifest batch | Batch identity, order, source hash, status, attempts and loading/quality counters used across later stages |
+| `raw_visit_lines` | One physical batch line | Preserve raw source text and exact line location before JSON parsing |
+
+A successful Stage 3 batch has status `landed`. It will become `completed` only
+in later stages after validation and business-state processing succeed.
+
+### Stage 3 files and flow
+
+```text
+manifest.json
+     |
+     v
+src/land_visit_batches.py
+     |
+     +---- verifies stable batch identity/content
+     +---- records processing attempt
+     +---- lands every physical JSONL line transactionally
+     +---- marks batch landed / failed
+     |
+     v
+DuckDB
+  ingestion_batches
+  raw_visit_lines
+     |
+     v
+tests/test_batch_landing.py
+```
+
+| File | Responsibility |
+| --- | --- |
+| `sql/schema.sql` | Adds batch-audit and raw-line tables |
+| `src/database.py` | Supports the normal database and isolated temporary test databases |
+| `src/land_visit_batches.py` | Reads manifest order, lands batches, prevents replay changes and supports restart |
+| `tests/test_batch_landing.py` | Checks counts, order, replay no-op and simulated failure/restart |
+| `docs/DATA_MODEL.md` | Documents the new landing grains and lifecycle |
+
+### Run Stage 3
+
+The Stage 2 reference layer should already exist.
+
+Land the visit batches:
+
+```powershell
+python -m src.land_visit_batches
+```
+
+Expected totals:
+
+```text
+6 manifest batches
+1,997 raw visit input lines
+```
+
+Run the Stage 3 tests:
+
+```powershell
+python -m pytest tests/test_batch_landing.py -q
+```
+
+Then rerun the landing command:
+
+```powershell
+python -m src.land_visit_batches
+```
+
+The second run should show each batch as `skipped`. That demonstrates replay is
+a no-op at this layer.
+
+### Important boundary
+
+Stage 3 answers:
+
+> What exact batch lines arrived, in what batch/order, and can I land them safely?
+
+Stage 4 answers:
+
+> Which of those lines are technically valid JSON events, and why are invalid
+> lines rejected?
+
+Duplicate `event_id`, `source_version`, deletes and current visit state are handled
+after technical validation, not silently mixed into raw landing.
+
+---
+
 ## How to run the project currently
 
 From the repository root:
@@ -394,14 +518,21 @@ cd D:\project\onside\Assignment
 
 python -m src.verify_sources
 python -m src.load_reference_data
-python -m pytest tests/test_reference_data.py -q
+python -m src.land_visit_batches
+python -m pytest -q
 ```
 
-At the current stage this performs source verification, builds the local
-reference database and checks the reference layer.
+At the current stage this:
 
-Later stages will add one top-level pipeline command so a reviewer can rebuild
-the complete project and report from a fresh checkout.
+1. verifies the immutable raw files;
+2. rebuilds and validates the typed reference layer;
+3. lands all six visit-change batches in manifest order;
+4. preserves all 1,997 physical JSONL lines;
+5. checks replay/restart behaviour through automated tests.
+
+Later stages will add technical event validation, current-state modelling,
+analytics models and report generation. A final top-level pipeline command will
+eventually rebuild the complete project from a fresh checkout.
 
 ---
 
@@ -417,18 +548,20 @@ the complete project and report from a fresh checkout.
 │   ├── property_management.csv
 │   ├── report_weeks.csv
 │   ├── visit_changes/
-│   └── modelled/                 # generated local database; ignored by Git
+│   └── modelled/                 # generated DuckDB; ignored by Git
 ├── docs/
 │   ├── ORIGINAL_ASSIGNMENT_BRIEF.md
-│   └── DATA_MODEL.md
+│   └── DATA_MODEL.md             # cumulative model documentation
 ├── sql/
 │   └── schema.sql
 ├── src/
 │   ├── __init__.py
 │   ├── database.py
+│   ├── land_visit_batches.py
 │   ├── load_reference_data.py
 │   └── verify_sources.py
 ├── tests/
+│   ├── test_batch_landing.py
 │   └── test_reference_data.py
 ├── .gitattributes
 ├── .gitignore
@@ -459,9 +592,13 @@ the complete project and report from a fresh checkout.
 
 ---
 
+---
+
 ## AI / tool use
 
 The project brief explicitly permits AI and familiar development tools. AI
 assistance may be used for learning, implementation review and documentation.
 All submitted code, design decisions and findings are reviewed and understood by
 the candidate and will be explainable during the interview.
+
+---

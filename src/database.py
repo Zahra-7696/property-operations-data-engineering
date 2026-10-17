@@ -12,17 +12,22 @@ DB_PATH = MODELLED_DIR / "onside.duckdb"
 SCHEMA_PATH = PROJECT_ROOT / "sql" / "schema.sql"
 
 
-def connect_database(*, read_only: bool = False) -> duckdb.DuckDBPyConnection:
-    """Open the project DuckDB database."""
-    MODELLED_DIR.mkdir(parents=True, exist_ok=True)
+def connect_database(
+    *,
+    read_only: bool = False,
+    db_path: Path | str | None = None,
+) -> duckdb.DuckDBPyConnection:
+    """Open the project DuckDB database, or an explicitly supplied test database."""
+    path = Path(db_path) if db_path is not None else DB_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
 
-    if read_only and not DB_PATH.exists():
+    if read_only and not path.exists():
         raise FileNotFoundError(
-            f"Database does not exist yet: {DB_PATH}\n"
+            f"Database does not exist yet: {path}\n"
             "Run: python -m src.load_reference_data"
         )
 
-    return duckdb.connect(str(DB_PATH), read_only=read_only)
+    return duckdb.connect(str(path), read_only=read_only)
 
 
 def apply_schema(connection: duckdb.DuckDBPyConnection) -> None:

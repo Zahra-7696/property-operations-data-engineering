@@ -10,3 +10,5 @@ data/visit_changes/*.jsonl -text
 *.yaml text eol=lf
 *.json text eol=lf
 *.toml text eol=lf
+*.ini text eol=lf
+*.txt text eol=lf
