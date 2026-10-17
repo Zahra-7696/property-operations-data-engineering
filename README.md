@@ -197,7 +197,7 @@ working correctly.
 | --- | --- | --- | --- |
 | 1. Project setup and raw integrity | Preserve the supplied source exactly and establish a reproducible Python/Git project | `src/verify_sources.py`, dependencies, Git configuration | **Done** |
 | 2. Persistent source layer | Create DuckDB and load/validate the six static/reference CSV sources | `sql/schema.sql`, `src/database.py`, `src/load_reference_data.py` | **Done** |
-| 3. Visit batch ingestion | Read `manifest.json`, land all physical JSONL lines in order and record replay/restart-safe batch progress | `ingestion_batches`, `raw_visit_lines`, landing code/tests | **In progress** |
+| 3. Visit batch ingestion | Read `manifest.json`, land all physical JSONL lines in order and record replay/restart-safe batch progress | `ingestion_batches`, `raw_visit_lines`, landing code/tests | **Done** |
 | 4. Technical validation | Record malformed or technically invalid source lines without stopping valid records | Reject/audit evidence | Not started |
 | 5. Versioning, duplicates and deletes | Make replay safe; handle repeated `event_id`, `source_version`, delete and reactivation rules | Event history and current visit state | Not started |
 | 6. Business data quality | Flag unknown references and invalid durations while preserving evidence | Quality-issue model | Not started |
@@ -232,7 +232,7 @@ working correctly.
 
 ### Current stage
 
-- [ ] Run and confirm Stage 3 batch-landing checks locally
+- [x] Run and confirm Stage 3 batch-landing checks locally
 
 ### Next
 
