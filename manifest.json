@@ -1,0 +1,32 @@
+[
+  {
+    "batch_id": "batch_01",
+    "file": "data/visit_changes/batch_01.jsonl",
+    "snapshot_date": "2026-04-13"
+  },
+  {
+    "batch_id": "batch_02",
+    "file": "data/visit_changes/batch_02.jsonl",
+    "snapshot_date": "2026-04-14"
+  },
+  {
+    "batch_id": "batch_03",
+    "file": "data/visit_changes/batch_03.jsonl",
+    "snapshot_date": "2026-04-15"
+  },
+  {
+    "batch_id": "batch_04",
+    "file": "data/visit_changes/batch_04.jsonl",
+    "snapshot_date": "2026-04-16"
+  },
+  {
+    "batch_id": "batch_05",
+    "file": "data/visit_changes/batch_05.jsonl",
+    "snapshot_date": "2026-04-17"
+  },
+  {
+    "batch_id": "batch_06",
+    "file": "data/visit_changes/batch_06.jsonl",
+    "snapshot_date": "2026-04-18"
+  }
+]

@@ -1,0 +1,45 @@
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Local databases and database sidecars
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.db
+*.duckdb
+*.duckdb.wal
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary / generated cache files
+*.tmp
+*.log
+.cache/
+
+# Packaging / build artefacts
+build/
+dist/
+*.egg-info/

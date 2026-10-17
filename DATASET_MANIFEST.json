@@ -1,0 +1,50 @@
+{
+  "data/companies.csv": {
+    "rows": 3,
+    "sha256": "9db69eab49d394c853ae1eef8acbfd2b73b78805a64eaebee5d217eafa700746"
+  },
+  "data/contractors.csv": {
+    "rows": 8,
+    "sha256": "1771672649ac44bfaf3846a050d177da313841b5dff98a1f7ae4253819c5656c"
+  },
+  "data/incidents.csv": {
+    "rows": 247,
+    "sha256": "66cabc89f328540cbfeec3e6b4bf1da2ca2060c007389a59695d55615da3e24b"
+  },
+  "data/properties.csv": {
+    "rows": 24,
+    "sha256": "369da9e8aa305defa0487bd1ff6c10ffedc7fbb47400b30551b33280c6c7446f"
+  },
+  "data/property_management.csv": {
+    "rows": 62,
+    "sha256": "858609afae4966d83baee67a3e292e9ac5d5e453691e428f9955281d20b2134e"
+  },
+  "data/report_weeks.csv": {
+    "rows": 6,
+    "sha256": "b02ebe39f85334ae49218d7c7da14fb26cf10553171e7da50cd70e4642932280"
+  },
+  "data/visit_changes/batch_01.jsonl": {
+    "rows": 381,
+    "sha256": "ffe6156e0cbeefd7f8409cd9c2030afb9fb740b56f516bc406bd484c912480bc"
+  },
+  "data/visit_changes/batch_02.jsonl": {
+    "rows": 323,
+    "sha256": "65e9ccd2447d29550b46c34510ab2cd92ae76cd93b6f71fa0c37b0e0efa3f7cd"
+  },
+  "data/visit_changes/batch_03.jsonl": {
+    "rows": 323,
+    "sha256": "e24786415453eef73e317181a00399178c120c252957c9bccab1649cecc1cf09"
+  },
+  "data/visit_changes/batch_04.jsonl": {
+    "rows": 323,
+    "sha256": "083c970fae8b72f0a4581b86662565ab8e4abc35aff0f09941258d14e3b298ee"
+  },
+  "data/visit_changes/batch_05.jsonl": {
+    "rows": 323,
+    "sha256": "d37bee3013392db4d7584cd3b818ef56acc559c0c53d6af008d64bbda4193321"
+  },
+  "data/visit_changes/batch_06.jsonl": {
+    "rows": 324,
+    "sha256": "3f505929d129f3f2d739b837337df31bd59fc205fdd027cde37d0869bb23b26d"
+  }
+}
