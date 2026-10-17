@@ -1,0 +1,12 @@
+# Preserve supplied raw data byte-for-byte so checksum verification is reproducible.
+data/*.csv -text
+data/visit_changes/*.jsonl -text
+
+# Keep project source/documentation line endings consistent across operating systems.
+*.py text eol=lf
+*.sql text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.toml text eol=lf

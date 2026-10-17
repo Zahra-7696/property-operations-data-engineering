@@ -126,89 +126,342 @@ audit trail or a discussion of scaling. Completing the core project well is suff
 
 ---
 
+---
+
 ## Candidate implementation
+
+### Project approach
+
+The project is implemented as a small reproducible data pipeline rather than a
+set of unrelated scripts.
+
+The planned data flow is:
+
+```text
+Supplied raw files
+        |
+        v
+Source integrity verification
+        |
+        v
+Typed DuckDB source tables
+        |
+        v
+Visit batch ingestion + technical validation
+        |
+        v
+Duplicate / version / delete handling
+        |
+        v
+Business-quality checks
+        |
+        v
+Clean current state + management history
+        |
+        v
+Visit and incident analytical facts
+        |
+        v
+Gold reporting models
+        |
+        v
+Self-contained HTML operations report
+```
+
+The raw files under `data/` remain unchanged. Generated database files are
+rebuildable and are not committed to Git.
 
 ### Technology choices
 
-The core implementation uses:
+| Area | Tool | Purpose |
+| --- | --- | --- |
+| Language | Python | Ingestion, validation, orchestration and report generation |
+| Local database | DuckDB | Persistent typed source, analytical and reporting models |
+| Transformation | SQL | Clear, reviewable data modelling and aggregations |
+| Testing | pytest | Automated ingestion, modelling and reporting checks |
+| Report | Plotly + Jinja2 | Self-contained reviewable HTML report |
+| Code quality | Ruff | Lightweight Python linting |
+| CI | GitHub Actions | Automated validation on push / pull request |
 
-- **Python** for ingestion, validation, orchestration and report generation.
-- **DuckDB** as the persistent local analytical database.
-- **SQL** for modelling and reporting transformations.
-- **pytest** for automated tests.
-- **Plotly + Jinja2** for a self-contained HTML report.
-- **GitHub Actions** for continuous integration.
-
-The core solution is intentionally local and reproducible. A production-scale
-AWS/Snowflake design will be documented separately after the local pipeline is
+The core implementation is intentionally local and reproducible. A production
+AWS/Snowflake evolution will be documented only after the core assignment is
 working correctly.
 
-### Source-data integrity
+---
 
-The supplied source files are treated as immutable inputs.
+## Implementation roadmap
 
-Before ingestion, `src/verify_sources.py` verifies every supplied data file
-against `DATASET_MANIFEST.json` using:
+| Stage | Aim | Main output | Status |
+| --- | --- | --- | --- |
+| 1. Project setup and raw integrity | Preserve the supplied source exactly and establish a reproducible Python/Git project | `src/verify_sources.py`, dependencies, Git configuration | **Done** |
+| 2. Persistent source layer | Create DuckDB and load/validate the six static/reference CSV sources | `sql/schema.sql`, `src/database.py`, `src/load_reference_data.py` | **Implementation done; tests being confirmed** |
+| 3. Visit batch ingestion | Read `manifest.json`, process the six JSONL batches in order and record batch progress | Batch audit tables and ingestion code | Not started |
+| 4. Technical validation | Record malformed or technically invalid source lines without stopping valid records | Reject/audit evidence | Not started |
+| 5. Versioning, duplicates and deletes | Make replay safe; handle repeated `event_id`, `source_version`, delete and reactivation rules | Event history and current visit state | Not started |
+| 6. Business data quality | Flag unknown references and invalid durations while preserving evidence | Quality-issue model | Not started |
+| 7. Management history | Convert observations into historical management intervals and current management | Historical/current management models | Not started |
+| 8. Analytical facts | Attribute visits/incidents historically, apply local week rules and UTC elapsed hours | Visit and incident facts | Not started |
+| 9. Gold reporting models | Create company-week, property-week and contractor-ready reporting models | BI/reporting tables | Not started |
+| 10. Operations report | Build a polished report with KPIs, trends, summaries, findings and quality/load evidence | `reports/operations_report.html` | Not started |
+| 11. Full validation suite | Cover edge cases including replay, rollback, stale versions, transfer boundaries and DST | Automated test suite | Not started |
+| 12. CI and reproducibility | Run checks automatically from a clean Git checkout | GitHub Actions workflow | Not started |
+| 13. Production design | Explain how the solution could scale using AWS/S3/event-driven services/Snowflake | Architecture document | Not started |
+| 14. Interview walkthrough | Trace sample records from source to final metrics and explain trade-offs | Interview-ready walkthrough | Not started |
 
-1. the expected row count; and
-2. the expected SHA256 checksum.
+---
 
-For JSONL files, the integrity check counts physical input lines without parsing
-them. This is deliberate because malformed JSON records are part of the supplied
-test data and must be handled later by the ingestion/validation layer.
+## Current implementation status
 
-Run the integrity check from the project root:
+### Completed
 
-```bash
+- [x] Preserve all supplied raw files unchanged
+- [x] Verify raw source row counts against `DATASET_MANIFEST.json`
+- [x] Verify raw source SHA256 checksums
+- [x] Add `.gitattributes` to protect raw CSV/JSONL bytes from Git line-ending conversion
+- [x] Create the persistent DuckDB schema
+- [x] Load all six static/reference sources into typed tables
+- [x] Validate reference-table row counts
+- [x] Validate reference relationships and incident severity domain
+- [x] Make reference-data reload transactional / rollback-safe
+
+### In progress
+
+- [ ] Confirm Stage 2 automated pytest checks pass from the project root
+
+### Next
+
+- [ ] Implement visit batch ingestion
+- [ ] Record technical rejects and loading counts
+- [ ] Implement idempotent replay and restart-safe batches
+- [ ] Maintain latest visit state using `source_version`
+- [ ] Model property-management history
+- [ ] Build visit and incident analytical facts
+- [ ] Build weekly gold reporting models
+- [ ] Generate the HTML operations report
+- [ ] Add the complete edge-case test suite
+- [ ] Add GitHub Actions CI
+- [ ] Document production-scale AWS/Snowflake evolution
+
+---
+
+## Stage 1 — Setup and raw-data integrity
+
+### Aim
+
+Establish a reproducible project and prove that the supplied source files have
+not been changed before any transformation begins.
+
+### Why it is needed
+
+`DATASET_MANIFEST.json` provides expected row counts and SHA256 checksums. The
+source includes deliberately malformed JSONL records, so source integrity and
+record validity must remain separate concerns.
+
+### Files
+
+| File | Role |
+| --- | --- |
+| `requirements.txt` | Python dependency definition |
+| `.gitignore` | Excludes environments, secrets and generated databases |
+| `.gitattributes` | Preserves raw CSV/JSONL files byte-for-byte across operating systems |
+| `src/verify_sources.py` | Checks supplied row counts and SHA256 checksums |
+| `src/__init__.py` | Makes `src` importable as a Python package |
+
+### Run
+
+```powershell
 python -m src.verify_sources
 ```
 
-A successful run finishes with:
+Expected final result:
 
 ```text
 SUCCESS: All supplied source files match DATASET_MANIFEST.json.
 ```
 
-### Implementation status
+---
 
-- [x] Preserve supplied raw files unchanged
-- [x] Add source-integrity verification
-- [ ] Create persistent DuckDB schema
-- [ ] Load reference/master data
-- [ ] Implement visit batch ingestion
-- [ ] Record technical rejects and data-quality evidence
-- [ ] Implement idempotent replay and restart-safe batches
-- [ ] Maintain latest visit state using `source_version`
-- [ ] Model property-management history
-- [ ] Build visit and incident analytical facts
-- [ ] Build weekly reporting marts
-- [ ] Generate a reviewable HTML report
-- [ ] Add complete automated test coverage
-- [ ] Add GitHub Actions CI
-- [ ] Document production-scale AWS/Snowflake evolution
+## Stage 2 — Persistent typed reference layer
 
-### Local setup
+### Aim
 
-Create and activate a virtual environment, then install dependencies.
+Create a persistent DuckDB database and load the six static/reference CSV
+sources into typed tables.
 
-Windows PowerShell:
+The visit-change JSONL batches are deliberately excluded from this stage because
+they require dedicated duplicate, validation, version and delete logic.
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-pip install -r requirements.txt
+### Database
+
+Generated locally at:
+
+```text
+data/modelled/onside.duckdb
 ```
 
-Verify the supplied data before continuing:
+The database file is excluded from Git because it is fully rebuildable from the
+committed raw data and code.
+
+### Source tables
+
+| Table | Grain | Primary key |
+| --- | --- | --- |
+| `src_companies` | One managing company | `company_id` |
+| `src_contractors` | One contractor | `contractor_id` |
+| `src_properties` | One property | `property_id` |
+| `src_property_management` | One management observation | `observation_id` |
+| `src_incidents` | One incident | `incident_id` |
+| `src_report_weeks` | One requested report week | `week_start` |
+
+### Stage 2 files and how they connect
+
+```text
+sql/schema.sql
+      |
+      v
+src/database.py
+      |
+      +---- creates/connects to data/modelled/onside.duckdb
+      |
+      v
+src/load_reference_data.py
+      |
+      +---- reads the six supplied CSV files
+      +---- loads typed source tables in one transaction
+      +---- validates counts and logical references
+      |
+      v
+tests/test_reference_data.py
+      |
+      +---- independently checks the loaded source layer
+```
+
+File responsibilities:
+
+| File | Responsibility |
+| --- | --- |
+| `sql/schema.sql` | Defines the typed DuckDB source tables |
+| `src/database.py` | Central database path, connection and schema setup |
+| `src/load_reference_data.py` | Loads and validates all six static/reference sources atomically |
+| `tests/test_reference_data.py` | Automated checks for counts, references, severity and report-week rules |
+| `docs/DATA_MODEL.md` | Documents grains, keys and source-layer design choices |
+| `pytest.ini` | Makes project-root modules available consistently when running pytest |
+
+### Run Stage 2
+
+First verify the immutable raw layer:
 
 ```powershell
 python -m src.verify_sources
 ```
 
-### AI/tool use
+Then rebuild the typed reference layer:
 
-The project brief explicitly permits the use of AI and familiar development
-tools. AI assistance may be used for learning, review and implementation support.
-All submitted design decisions and code are reviewed and understood by the
-candidate and will be explainable during the interview.
+```powershell
+python -m src.load_reference_data
+```
+
+Then run its automated tests:
+
+```powershell
+python -m pytest tests/test_reference_data.py -q
+```
+
+Expected reference counts:
+
+```text
+src_companies                3
+src_contractors              8
+src_properties              24
+src_property_management     62
+src_incidents              247
+src_report_weeks             6
+```
+
+The loader runs inside one transaction. If loading or validation fails before
+commit, DuckDB rolls back instead of leaving a partially rebuilt reference layer.
+
+---
+
+## How to run the project currently
+
+From the repository root:
+
+```powershell
+cd D:\project\onside\Assignment
+
+.\.venv\Scripts\Activate.ps1
+
+python -m src.verify_sources
+python -m src.load_reference_data
+python -m pytest tests/test_reference_data.py -q
+```
+
+At the current stage this performs source verification, builds the local
+reference database and checks the reference layer.
+
+Later stages will add one top-level pipeline command so a reviewer can rebuild
+the complete project and report from a fresh checkout.
+
+---
+
+## Repository structure
+
+```text
+.
+├── data/
+│   ├── companies.csv
+│   ├── contractors.csv
+│   ├── incidents.csv
+│   ├── properties.csv
+│   ├── property_management.csv
+│   ├── report_weeks.csv
+│   ├── visit_changes/
+│   └── modelled/                 # generated local database; ignored by Git
+├── docs/
+│   ├── ORIGINAL_ASSIGNMENT_BRIEF.md
+│   └── DATA_MODEL.md
+├── sql/
+│   └── schema.sql
+├── src/
+│   ├── __init__.py
+│   ├── database.py
+│   ├── load_reference_data.py
+│   └── verify_sources.py
+├── tests/
+│   └── test_reference_data.py
+├── .gitattributes
+├── .gitignore
+├── pytest.ini
+├── requirements.txt
+├── manifest.json
+├── DATASET_MANIFEST.json
+├── BUSINESS_CONTEXT.md
+├── DATA_DICTIONARY.md
+├── PROJECT_GUIDANCE.md
+└── README.md
+```
+
+---
+
+## Design principles used throughout the project
+
+- Preserve supplied raw files unchanged.
+- Separate source integrity from record validity.
+- Keep source, clean analytical and reporting grains explicit.
+- Preserve evidence instead of silently discarding bad records.
+- Make ingestion idempotent and restartable.
+- Prefer correctness and explainability over unnecessary infrastructure.
+- Keep generated state rebuildable from committed code and source data.
+- Add tests alongside each important business rule.
+- Keep the final business report understandable without requiring the reader to
+  inspect Python code.
+
+---
+
+## AI / tool use
+
+The project brief explicitly permits AI and familiar development tools. AI
+assistance may be used for learning, implementation review and documentation.
+All submitted code, design decisions and findings are reviewed and understood by
+the candidate and will be explainable during the interview.
