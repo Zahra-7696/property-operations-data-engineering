@@ -34,6 +34,14 @@ def _format_utc(value: datetime | None) -> str:
     )
 
 
+
+def _format_local(value: datetime | None) -> str:
+    if value is None:
+        return "-"
+
+    return value.strftime("%Y-%m-%dT%H:%M:%S")
+
+
 def _duration_minutes(
     started_at: datetime | None,
     ended_at: datetime | None,
@@ -1308,6 +1316,243 @@ def _stage_7_lines(
         ),
     ]
 
+
+def _has_stage8_results(
+    connection: duckdb.DuckDBPyConnection,
+) -> bool:
+    if not _table_exists(connection, "fact_visits"):
+        return False
+
+    return connection.execute(
+        "SELECT COUNT(*) FROM fact_visits"
+    ).fetchone()[0] > 0
+
+
+def _stage_8_lines(
+    connection: duckdb.DuckDBPyConnection,
+) -> list[str]:
+    visit_total = connection.execute(
+        "SELECT COUNT(*) FROM fact_visits"
+    ).fetchone()[0]
+
+    incident_total = connection.execute(
+        "SELECT COUNT(*) FROM fact_incidents"
+    ).fetchone()[0]
+
+    requested = connection.execute(
+        """
+        SELECT
+            COUNT(*) AS visit_count,
+            COUNT(DISTINCT visitor_id) AS distinct_visitors,
+            ROUND(COALESCE(SUM(completed_hours), 0), 2) AS completed_hours,
+            COALESCE(
+                SUM(CASE WHEN is_unfinished THEN 1 ELSE 0 END),
+                0
+            ) AS unfinished_visits
+        FROM fact_visits
+        WHERE is_requested_week = TRUE
+        """
+    ).fetchone()
+
+    requested_incidents = connection.execute(
+        """
+        SELECT
+            COUNT(*) AS incident_count,
+            COALESCE(
+                SUM(CASE WHEN is_high THEN 1 ELSE 0 END),
+                0
+            ) AS high_incidents
+        FROM fact_incidents
+        WHERE is_requested_week = TRUE
+        """
+    ).fetchone()
+
+    requested_visit_count = requested[0]
+    requested_incident_count = requested_incidents[0]
+
+    history_examples = connection.execute(
+        """
+        SELECT
+            'visit' AS record_type,
+            visit_id AS record_id,
+            property_id,
+            started_at AS business_time,
+            company_id
+        FROM fact_visits
+        WHERE visit_id IN ('V09', 'V10')
+
+        UNION ALL
+
+        SELECT
+            'incident' AS record_type,
+            incident_id AS record_id,
+            property_id,
+            reported_at AS business_time,
+            company_id
+        FROM fact_incidents
+        WHERE incident_id IN ('I06', 'I07')
+
+        ORDER BY business_time, record_type, record_id
+        """
+    ).fetchall()
+
+    week_examples = connection.execute(
+        """
+        SELECT
+            visit_id,
+            property_id,
+            property_timezone,
+            started_at,
+            local_started_at,
+            week_start_local
+        FROM fact_visits
+        WHERE visit_id IN ('V14', 'V01')
+        ORDER BY started_at
+        """
+    ).fetchall()
+
+    dst_examples = connection.execute(
+        """
+        SELECT
+            visit_id,
+            property_timezone,
+            started_at,
+            ended_at,
+            local_started_at,
+            local_ended_at,
+            completed_hours
+        FROM fact_visits
+        WHERE visit_id IN ('V07', 'V16')
+        ORDER BY visit_id
+        """
+    ).fetchall()
+
+    return [
+        "STAGE 8 - ANALYTICAL VISIT AND INCIDENT FACTS",
+        _separator("-"),
+        (
+            "Purpose: create one reportable-visit fact row per visit and one "
+            "incident fact row per incident with historical company and "
+            "property-local reporting week attribution."
+        ),
+        "",
+        "Fact counts:",
+        f"  Visit facts (all reportable current visits) : {visit_total}",
+        f"  Incident facts (all supplied incidents)     : {incident_total}",
+        f"  Visits in requested local weeks             : {requested_visit_count}",
+        f"  Incidents in requested local weeks          : {requested_incident_count}",
+        f"  Visits outside requested weeks              : {visit_total - requested_visit_count}",
+        f"  Incidents outside requested weeks           : {incident_total - requested_incident_count}",
+        "",
+        "Requested-week metric checks:",
+        f"  Visit count             : {requested[0]}",
+        f"  Distinct visitors       : {requested[1]}",
+        f"  Completed visit hours   : {float(requested[2]):.2f}",
+        f"  Unfinished visits       : {requested[3]}",
+        f"  Incident count          : {requested_incidents[0]}",
+        f"  High-severity incidents : {requested_incidents[1]}",
+        "",
+        "Historical company attribution proof:",
+        format_text_table(
+            headers=["Type", "Record", "Property", "Business time UTC", "Company"],
+            rows=[
+                (
+                    record_type,
+                    record_id,
+                    property_id,
+                    _format_utc(business_time),
+                    company_id,
+                )
+                for (
+                    record_type,
+                    record_id,
+                    property_id,
+                    business_time,
+                    company_id,
+                ) in history_examples
+            ],
+            widths=[10, 10, 10, 22, 10],
+        ),
+        "",
+        "Property-local week-boundary proof:",
+        format_text_table(
+            headers=[
+                "Visit",
+                "Property",
+                "Timezone",
+                "Started UTC",
+                "Local start",
+                "Local week",
+            ],
+            rows=[
+                (
+                    visit_id,
+                    property_id,
+                    property_timezone,
+                    _format_utc(started_at),
+                    _format_local(local_started_at),
+                    week_start_local,
+                )
+                for (
+                    visit_id,
+                    property_id,
+                    property_timezone,
+                    started_at,
+                    local_started_at,
+                    week_start_local,
+                ) in week_examples
+            ],
+            widths=[8, 10, 20, 22, 20, 12],
+        ),
+        "",
+        "DST / elapsed-hours proof:",
+        format_text_table(
+            headers=[
+                "Visit",
+                "Timezone",
+                "Start UTC",
+                "End UTC",
+                "Local start",
+                "Local end",
+                "Hours",
+            ],
+            rows=[
+                (
+                    visit_id,
+                    property_timezone,
+                    _format_utc(started_at),
+                    _format_utc(ended_at),
+                    _format_local(local_started_at),
+                    _format_local(local_ended_at),
+                    f"{completed_hours:.2f}",
+                )
+                for (
+                    visit_id,
+                    property_timezone,
+                    started_at,
+                    ended_at,
+                    local_started_at,
+                    local_ended_at,
+                    completed_hours,
+                ) in dst_examples
+            ],
+            widths=[8, 20, 22, 22, 20, 20, 8],
+        ),
+        "",
+        (
+            "Visits use started_at for historical company and local reporting "
+            "week; incidents use reported_at."
+        ),
+        (
+            "Completed hours use elapsed TIMESTAMPTZ/UTC duration and are "
+            "therefore not distorted by daylight-saving clock changes."
+        ),
+        (
+            "Visit and incident facts remain separate; later reporting "
+            "aggregates each fact independently before combining metrics."
+        ),
+    ]
+
 def build_report_text(
     connection: duckdb.DuckDBPyConnection,
 ) -> str:
@@ -1343,6 +1588,9 @@ def build_report_text(
 
     if _has_stage7_results(connection):
         sections.append(_stage_7_lines(connection))
+
+    if _has_stage8_results(connection):
+        sections.append(_stage_8_lines(connection))
 
     return "\n\n".join("\n".join(section) for section in sections).rstrip() + "\n"
 

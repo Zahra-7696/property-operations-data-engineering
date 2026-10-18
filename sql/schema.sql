@@ -225,3 +225,47 @@ JOIN src_companies AS c
     ON c.company_id = i.company_id
 WHERE i.valid_to IS NULL;
 
+-- Stage 8: analytical fact tables.
+--
+-- Visit and incident facts remain separate to avoid many-to-many fanout.
+-- Local reporting week is derived in each property's IANA timezone.
+-- Duration is elapsed UTC time, not local wall-clock time.
+
+CREATE TABLE IF NOT EXISTS fact_visits (
+    visit_id VARCHAR PRIMARY KEY,
+    property_id VARCHAR NOT NULL,
+    property_name VARCHAR NOT NULL,
+    property_timezone VARCHAR NOT NULL,
+    contractor_id VARCHAR NOT NULL,
+    contractor_name VARCHAR NOT NULL,
+    visitor_id VARCHAR NOT NULL,
+    company_id VARCHAR NOT NULL,
+    company_name VARCHAR NOT NULL,
+    started_at TIMESTAMPTZ NOT NULL,
+    ended_at TIMESTAMPTZ,
+    local_started_at TIMESTAMP NOT NULL,
+    local_ended_at TIMESTAMP,
+    week_start_local DATE NOT NULL,
+    is_requested_week BOOLEAN NOT NULL,
+    is_unfinished BOOLEAN NOT NULL,
+    completed_hours DOUBLE,
+    source_version BIGINT NOT NULL,
+    winning_event_id VARCHAR NOT NULL,
+    CHECK (completed_hours IS NULL OR completed_hours >= 0)
+);
+
+CREATE TABLE IF NOT EXISTS fact_incidents (
+    incident_id VARCHAR PRIMARY KEY,
+    property_id VARCHAR NOT NULL,
+    property_name VARCHAR NOT NULL,
+    property_timezone VARCHAR NOT NULL,
+    company_id VARCHAR NOT NULL,
+    company_name VARCHAR NOT NULL,
+    reported_at TIMESTAMPTZ NOT NULL,
+    local_reported_at TIMESTAMP NOT NULL,
+    week_start_local DATE NOT NULL,
+    is_requested_week BOOLEAN NOT NULL,
+    severity VARCHAR NOT NULL CHECK (severity IN ('low', 'medium', 'high')),
+    is_high BOOLEAN NOT NULL
+);
+

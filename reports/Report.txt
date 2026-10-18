@@ -856,3 +856,58 @@ Current-management lookup:
 
 Interval rule: [valid_from, valid_to). A record exactly at the transfer timestamp belongs to the new company.
 Consecutive unchanged observations collapse into one interval; a later return to a previous company creates a new interval.
+
+STAGE 8 - ANALYTICAL VISIT AND INCIDENT FACTS
+----------------------------------------------------------------------------------------------------------------
+Purpose: create one reportable-visit fact row per visit and one incident fact row per incident with historical company and property-local reporting week attribution.
+
+Fact counts:
+  Visit facts (all reportable current visits) : 1564
+  Incident facts (all supplied incidents)     : 247
+  Visits in requested local weeks             : 1543
+  Incidents in requested local weeks          : 246
+  Visits outside requested weeks              : 21
+  Incidents outside requested weeks           : 1
+
+Requested-week metric checks:
+  Visit count             : 1543
+  Distinct visitors       : 259
+  Completed visit hours   : 2053.50
+  Unfinished visits       : 91
+  Incident count          : 246
+  High-severity incidents : 31
+
+Historical company attribution proof:
++------------+------------+------------+------------------------+------------+
+| Type       | Record     | Property   | Business time UTC      | Company    |
++------------+------------+------------+------------------------+------------+
+| incident   | I07        | P03        | 2026-03-29T12:59:00Z   | C02        |
++------------+------------+------------+------------------------+------------+
+| visit      | V09        | P03        | 2026-03-29T12:59:00Z   | C02        |
++------------+------------+------------+------------------------+------------+
+| incident   | I06        | P03        | 2026-03-29T13:00:00Z   | C03        |
++------------+------------+------------+------------------------+------------+
+| visit      | V10        | P03        | 2026-03-29T13:00:00Z   | C03        |
++------------+------------+------------+------------------------+------------+
+
+Property-local week-boundary proof:
++----------+------------+----------------------+------------------------+----------------------+--------------+
+| Visit    | Property   | Timezone             | Started UTC            | Local start          | Local week   |
++----------+------------+----------------------+------------------------+----------------------+--------------+
+| V14      | P01        | Pacific/Auckland     | 2026-03-22T10:59:00Z   | 2026-03-22T23:59:00  | 2026-03-16   |
++----------+------------+----------------------+------------------------+----------------------+--------------+
+| V01      | P01        | Pacific/Auckland     | 2026-03-22T11:00:00Z   | 2026-03-23T00:00:00  | 2026-03-23   |
++----------+------------+----------------------+------------------------+----------------------+--------------+
+
+DST / elapsed-hours proof:
++----------+----------------------+------------------------+------------------------+----------------------+----------------------+----------+
+| Visit    | Timezone             | Start UTC              | End UTC                | Local start          | Local end            | Hours    |
++----------+----------------------+------------------------+------------------------+----------------------+----------------------+----------+
+| V07      | Pacific/Auckland     | 2026-04-04T13:30:00Z   | 2026-04-04T15:30:00Z   | 2026-04-05T02:30:00  | 2026-04-05T03:30:00  | 2.00     |
++----------+----------------------+------------------------+------------------------+----------------------+----------------------+----------+
+| V16      | Pacific/Auckland     | 2026-04-04T13:30:00Z   | 2026-04-04T15:30:00Z   | 2026-04-05T02:30:00  | 2026-04-05T03:30:00  | 2.00     |
++----------+----------------------+------------------------+------------------------+----------------------+----------------------+----------+
+
+Visits use started_at for historical company and local reporting week; incidents use reported_at.
+Completed hours use elapsed TIMESTAMPTZ/UTC duration and are therefore not distorted by daylight-saving clock changes.
+Visit and incident facts remain separate; later reporting aggregates each fact independently before combining metrics.

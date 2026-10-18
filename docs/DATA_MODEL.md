@@ -662,3 +662,144 @@ The cumulative `reports/Report.txt` adds:
 Stage 8 uses this historical model to attribute reportable visits by
 `started_at` and incidents by `reported_at`.
 
+---
+
+## Stage 8 — Analytical visit and incident facts
+
+### Scope
+
+Stage 8 converts the clean current visit population and supplied incidents into
+separate analytical fact tables.
+
+The two facts remain separate because there is no incident-to-visit or
+incident-to-contractor key. Raw joining them would multiply rows and inflate
+metrics.
+
+Historical company attribution uses:
+
+```text
+visit    -> started_at
+incident -> reported_at
+```
+
+Reporting week is the Monday date derived after converting the corresponding
+business timestamp into the property's IANA timezone.
+
+### Deterministic date/time session
+
+All DuckDB connections set:
+
+```text
+TimeZone = UTC
+Calendar = gregorian
+```
+
+The explicit Gregorian calendar is important because reporting-week labels are
+Gregorian `DATE` values. Property-local timestamps are then derived explicitly
+from the stored `TIMESTAMPTZ` instant using each property's IANA timezone.
+
+### `fact_visits`
+
+**Grain:** one reportable current business visit.
+
+Primary key:
+
+```text
+visit_id
+```
+
+Important fields include:
+
+- property and contractor identifiers/names;
+- visitor ID;
+- historical managing company at `started_at`;
+- UTC start/end;
+- property-local start/end;
+- local Monday `week_start_local`;
+- `is_requested_week`;
+- `is_unfinished`;
+- elapsed `completed_hours`;
+- current source version and winning event.
+
+Unfinished visits remain facts and contribute no completed hours.
+
+### `fact_incidents`
+
+**Grain:** one supplied incident.
+
+Primary key:
+
+```text
+incident_id
+```
+
+Important fields include:
+
+- property;
+- historical managing company at `reported_at`;
+- UTC/local reported timestamp;
+- local Monday `week_start_local`;
+- `is_requested_week`;
+- severity and `is_high`.
+
+### Requested-week boundary
+
+`src_report_weeks` contains the six requested local Monday labels. Facts outside
+those labels are retained and marked `is_requested_week = FALSE`; they are not
+quality failures.
+
+Expected Stage 8 counts:
+
+```text
+1,564 visit facts in total
+1,543 visits in requested local weeks
+21 visits outside requested weeks
+
+247 incident facts in total
+246 incidents in requested local weeks
+1 incident outside requested weeks
+```
+
+### Property-local week example
+
+For `P01` (`Pacific/Auckland`):
+
+```text
+V14  2026-03-22T10:59:00Z -> local 2026-03-22 23:59 -> week 2026-03-16
+V01  2026-03-22T11:00:00Z -> local 2026-03-23 00:00 -> week 2026-03-23
+```
+
+One UTC minute crosses the property's local Monday boundary.
+
+### DST and completed hours
+
+Completed hours are elapsed time between UTC instants, not subtraction of local
+wall-clock display values.
+
+`V07` and `V16` cross the New Zealand daylight-saving transition:
+
+```text
+local start  2026-04-05 02:30
+local end    2026-04-05 03:30
+elapsed UTC  2.00 hours
+```
+
+The displayed local clocks differ by one hour because the UTC offset changes,
+but the actual elapsed visit duration is two hours.
+
+### Requested-week metric checks
+
+The Stage 8 facts produce:
+
+```text
+visit count              1,543
+distinct visitors          259
+completed visit hours   2,053.50
+unfinished visits           91
+incident count             246
+high-severity incidents     31
+```
+
+These are sanity checks for the fact layer. Stage 9 builds the explicit reporting
+marts at company/week, property/week and contractor grains.
+

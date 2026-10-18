@@ -27,7 +27,14 @@ def connect_database(
             "Run: python -m src.load_reference_data"
         )
 
-    return duckdb.connect(str(path), read_only=read_only)
+    connection = duckdb.connect(str(path), read_only=read_only)
+
+    # Make timestamp/date behaviour deterministic across developer machines.
+    # This matters for local-week derivation and TIMESTAMPTZ display.
+    connection.execute("SET TimeZone = 'UTC'")
+    connection.execute("SET Calendar = 'gregorian'")
+
+    return connection
 
 
 def apply_schema(connection: duckdb.DuckDBPyConnection) -> None:

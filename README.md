@@ -202,7 +202,7 @@ working correctly.
 | 5. Versioning, duplicates and deletes | Deduplicate global `event_id`, apply highest `source_version` per visit and retain delete tombstones/reactivation | `visit_events`, `visit_event_duplicates`, `visit_current_state` | **Done** |
 | 6. Business data quality | Flag unknown property/contractor references and invalid completed durations while preserving evidence | `visit_quality_issues`, `reportable_current_visits` | **Done** |
 | 7. Management history | Convert observations into contiguous historical intervals and expose current management separately | `property_management_intervals`, `current_property_management` | **Done** |
-| 8. Analytical facts | Attribute visits/incidents historically, apply local week rules and UTC elapsed hours | Visit and incident facts | Not started |
+| 8. Analytical facts | Attribute visits/incidents historically, derive property-local weeks and UTC elapsed hours | `fact_visits`, `fact_incidents` | **Done** |
 | 9. Gold reporting models | Create company-week, property-week and contractor-ready reporting models | BI/reporting tables | Not started |
 | 10. Operations report | Build a polished report with KPIs, trends, summaries, findings and quality/load evidence | `reports/operations_report.html` | Not started |
 | 11. Full validation suite | Cover edge cases including replay, rollback, stale versions, transfer boundaries and DST | Automated test suite | Not started |
@@ -284,9 +284,22 @@ working correctly.
 - [x] Confirm Stage 7 tests pass (`10 passed`)
 - [x] Confirm full regression suite passes (`60 passed`)
 
+### Completed in Stage 8
+
+- [x] Build one-row-per-visit analytical fact
+- [x] Build one-row-per-incident analytical fact
+- [x] Attribute each record to the historical managing company
+- [x] Derive Monday reporting week in each property's IANA timezone
+- [x] Calculate completed visit hours using elapsed UTC time
+- [x] Preserve valid records outside the requested reporting weeks
+- [x] Keep visits and incidents as separate fact grains
+- [x] Add a one-command pipeline runner through Stage 8
+- [x] Confirm Stage 8 tests pass (`11 passed`)
+- [x] Confirm full regression suite passes (`71 passed`)
+
 ### Next
 
-- [ ] Build historical visit and incident analytical facts
+- [ ] Build company/week, property/week and contractor reporting marts
 
 ---
 
@@ -1143,6 +1156,185 @@ historical company to every reportable activity record.
 
 ---
 
+## Stage 8 — Analytical visit and incident facts
+
+### Aim
+
+Stage 8 turns the cleaned latest visit state and incident source into analytics-ready
+facts. Each reportable visit becomes exactly one `fact_visits` row and each
+incident becomes exactly one `fact_incidents` row. The stage assigns the company
+that managed the property when the activity happened, converts the business time
+into the property's IANA timezone to determine the correct local Monday reporting
+week, and calculates completed visit duration from elapsed UTC time so daylight
+saving does not distort hours. Visits and incidents intentionally stay as separate
+fact grains because the source provides no direct key between them.
+
+### Questions answered
+
+- Which managing company was responsible when each visit or incident occurred?
+- Which local reporting week does each activity record belong to?
+- How many elapsed hours did a completed visit actually last?
+- How are unfinished visits represented?
+- Which otherwise-valid records fall outside the six requested report weeks?
+- Can visits and incidents be combined later without creating row multiplication?
+
+### How this stage solves them
+
+`src/build_analytical_facts.py` joins reportable visits and incidents separately to
+property timezone and historical management intervals. It derives local timestamps,
+Monday week labels and requested-week flags, then materialises `fact_visits` and
+`fact_incidents`. Visit duration uses the difference between the original
+`TIMESTAMPTZ` instants rather than local wall-clock timestamps.
+
+### Deterministic date/time settings
+
+Every DuckDB connection explicitly uses:
+
+```text
+TimeZone = UTC
+Calendar = gregorian
+```
+
+This prevents the machine's regional/calendar settings from changing timestamp
+display or local-week calculations. Property-local conversion is still performed
+explicitly with each property's IANA timezone (for example
+`Pacific/Auckland` or `Australia/Sydney`).
+
+### Why this stage exists
+
+The final report needs reliable business facts, not raw events or current-state
+tables. Historical company attribution, local-week logic and elapsed duration are
+all business rules that should be resolved once in the analytical layer rather
+than repeatedly inside charts. Keeping the visit and incident facts separate also
+prevents accidental many-to-many fanout before aggregation.
+
+### New model objects
+
+| Object | Grain | Purpose |
+| --- | --- | --- |
+| `fact_visits` | One reportable current visit | Historical company, local week, visitor/contractor and completed-hours analytics |
+| `fact_incidents` | One incident | Historical company, local week and severity analytics |
+
+### Expected results
+
+```text
+Visit facts total                    1564
+Visits in requested local weeks      1543
+Visits outside requested weeks         21
+
+Incident facts total                  247
+Incidents in requested local weeks    246
+Incidents outside requested weeks       1
+```
+
+Requested-week sanity metrics:
+
+```text
+Visit count                 1543
+Distinct visitors            259
+Completed visit hours     2053.50
+Unfinished visits              91
+Incident count                246
+High-severity incidents        31
+```
+
+### Important proofs
+
+Historical management:
+
+```text
+V09 / I07 at 12:59 -> C02
+V10 / I06 at 13:00 -> C03
+```
+
+Property-local Monday boundary:
+
+```text
+V14 -> local Sunday 23:59 -> week 2026-03-16
+V01 -> local Monday 00:00 -> week 2026-03-23
+```
+
+DST elapsed duration:
+
+```text
+V07 / V16
+local wall clock: 02:30 -> 03:30
+elapsed UTC time: 2.00 hours
+```
+
+### Run
+
+```powershell
+python -m src.build_analytical_facts
+```
+
+Then:
+
+```powershell
+python -m pytest tests/test_analytical_facts.py -q
+python -m pytest -q
+```
+
+The cumulative `reports/Report.txt` is extended with fact counts, requested-week
+metrics, historical-company proof, local-week proof and DST-duration proof.
+
+### Validation / tests
+
+Stage 8 adds 11 stage-specific tests. They cover fact grains/counts, requested
+weeks, historical company attribution, local week boundaries, DST elapsed hours,
+unfinished visits, requested-week metrics, idempotent rebuild and audit evidence.
+
+After Stage 8 is confirmed locally, the expected cumulative suite is:
+
+```text
+71 passed
+```
+
+### Boundary
+
+Stage 8 answers:
+
+> What are the trustworthy visit and incident facts used for reporting?
+
+Stage 9 aggregates those facts independently into company/week, property/week and
+contractor reporting marts.
+
+---
+
+
+## How a reviewer should run the project
+
+There are two useful execution modes.
+
+**For a clean reproducibility check**, run the pipeline with one command:
+
+```powershell
+python -m src.run_pipeline --fresh
+```
+
+This removes only the generated DuckDB file and rebuilds Stages 1–8 from the
+committed raw data and code.
+
+**For the interview walkthrough**, run individual stages so each engineering
+decision is visible:
+
+```powershell
+python -m src.verify_sources
+python -m src.load_reference_data
+python -m src.land_visit_batches
+python -m src.validate_visit_events
+python -m src.process_visit_state
+python -m src.check_visit_quality
+python -m src.build_management_history
+python -m src.build_analytical_facts
+```
+
+The final submitted project will keep the one-command pipeline as the normal
+reviewer path, while the stage commands remain useful for explanation and
+debugging.
+
+---
+
 ## Inspecting the DuckDB database
 
 The generated database is:
@@ -1198,6 +1390,7 @@ python -m src.validate_visit_events
 python -m src.process_visit_state
 python -m src.check_visit_quality
 python -m src.build_management_history
+python -m src.build_analytical_facts
 python -m pytest -q
 ```
 
@@ -1211,11 +1404,13 @@ At the current stage this:
 6. deduplicates deliveries and builds versioned current visit state;
 7. checks business-quality rules and creates `reportable_current_visits`;
 8. reconstructs historical and current property management;
-9. rebuilds the cumulative engineering/audit report;
-10. runs the automated regression suite.
+9. builds separate visit and incident analytical facts with historical company,
+   local-week and elapsed-hours logic;
+10. rebuilds the cumulative engineering/audit report;
+11. runs the automated regression suite.
 
-Later stages add analytical facts, gold reporting models and the final
-business-facing HTML operations report.
+Later stages add gold reporting models and the final business-facing HTML
+operations report.
 
 ---
 
@@ -1242,15 +1437,18 @@ business-facing HTML operations report.
 ├── src/
 │   ├── __init__.py
 │   ├── audit_report.py
+│   ├── build_analytical_facts.py
 │   ├── build_management_history.py
 │   ├── check_visit_quality.py
 │   ├── database.py
 │   ├── land_visit_batches.py
 │   ├── load_reference_data.py
 │   ├── process_visit_state.py
+│   ├── run_pipeline.py
 │   ├── validate_visit_events.py
 │   └── verify_sources.py
 ├── tests/
+│   ├── test_analytical_facts.py
 │   ├── test_batch_landing.py
 │   ├── test_management_history.py
 │   ├── test_reference_data.py
