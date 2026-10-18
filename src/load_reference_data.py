@@ -211,14 +211,17 @@ def _validate_loaded_reference_data(
     return actual_counts
 
 
-def load_reference_data() -> dict[str, int]:
+def load_reference_data(
+    *,
+    db_path: Path | str | None = None,
+) -> dict[str, int]:
     """
     Rebuild the typed reference/source tables atomically.
 
     The raw CSV files remain unchanged. If loading or validation fails, DuckDB
     rolls back the whole transaction so the database is not left half-loaded.
     """
-    connection = connect_database()
+    connection = connect_database(db_path=db_path)
     apply_schema(connection)
 
     try:

@@ -157,3 +157,39 @@ CREATE TABLE IF NOT EXISTS visit_current_state (
     source_line_number INTEGER NOT NULL CHECK (source_line_number > 0)
 );
 
+-- Stage 6: business-quality checks on the latest active visit state.
+--
+-- These are well-formed source events that are unsuitable for business metrics.
+-- Deleted visits are not quality failures and are excluded separately.
+
+CREATE TABLE IF NOT EXISTS visit_quality_issues (
+    visit_id VARCHAR NOT NULL,
+    issue_code VARCHAR NOT NULL
+        CHECK (
+            issue_code IN (
+                'unknown_property',
+                'unknown_contractor',
+                'end_before_start'
+            )
+        ),
+    winning_event_id VARCHAR NOT NULL,
+    source_batch_id VARCHAR NOT NULL,
+    source_line_number INTEGER NOT NULL CHECK (source_line_number > 0),
+    property_id VARCHAR,
+    contractor_id VARCHAR,
+    started_at TIMESTAMPTZ,
+    ended_at TIMESTAMPTZ,
+    issue_detail VARCHAR NOT NULL,
+    PRIMARY KEY (visit_id, issue_code)
+);
+
+CREATE OR REPLACE VIEW reportable_current_visits AS
+SELECT s.*
+FROM visit_current_state AS s
+WHERE s.is_deleted = FALSE
+  AND NOT EXISTS (
+      SELECT 1
+      FROM visit_quality_issues AS q
+      WHERE q.visit_id = s.visit_id
+  );
+

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import textwrap
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -19,6 +20,29 @@ DATASET_MANIFEST_PATH = PROJECT_ROOT / "DATASET_MANIFEST.json"
 
 def _separator(char: str = "=", width: int = 112) -> str:
     return char * width
+
+
+
+def _format_utc(value: datetime | None) -> str:
+    """Render TIMESTAMPTZ values consistently, independent of local display settings."""
+    if value is None:
+        return "-"
+
+    return (
+        value.astimezone(timezone.utc)
+        .strftime("%Y-%m-%dT%H:%M:%SZ")
+    )
+
+
+def _duration_minutes(
+    started_at: datetime | None,
+    ended_at: datetime | None,
+) -> str:
+    if started_at is None or ended_at is None:
+        return "-"
+
+    minutes = (ended_at - started_at).total_seconds() / 60
+    return f"{minutes:.1f}"
 
 
 def _technical_reject_category(reason_codes: str) -> str:
@@ -864,6 +888,176 @@ def _stage_5_lines(
         ),
     ]
 
+
+def _has_stage6_results(
+    connection: duckdb.DuckDBPyConnection,
+) -> bool:
+    if not _table_exists(connection, "visit_quality_issues"):
+        return False
+
+    # The fixed assignment dataset has three known current business-quality
+    # issues. A non-zero count therefore also acts as the Stage 6 completion
+    # signal for the cumulative report.
+    count = connection.execute(
+        "SELECT COUNT(*) FROM visit_quality_issues"
+    ).fetchone()[0]
+
+    return count > 0
+
+
+def _stage_6_lines(
+    connection: duckdb.DuckDBPyConnection,
+) -> list[str]:
+    active = connection.execute(
+        """
+        SELECT COUNT(*)
+        FROM visit_current_state
+        WHERE is_deleted = FALSE
+        """
+    ).fetchone()[0]
+
+    deleted = connection.execute(
+        """
+        SELECT COUNT(*)
+        FROM visit_current_state
+        WHERE is_deleted = TRUE
+        """
+    ).fetchone()[0]
+
+    issue_rows = connection.execute(
+        "SELECT COUNT(*) FROM visit_quality_issues"
+    ).fetchone()[0]
+
+    affected = connection.execute(
+        "SELECT COUNT(DISTINCT visit_id) FROM visit_quality_issues"
+    ).fetchone()[0]
+
+    reportable = connection.execute(
+        "SELECT COUNT(*) FROM reportable_current_visits"
+    ).fetchone()[0]
+
+    unfinished_reportable = connection.execute(
+        """
+        SELECT COUNT(*)
+        FROM reportable_current_visits
+        WHERE ended_at IS NULL
+        """
+    ).fetchone()[0]
+
+    issues = connection.execute(
+        """
+        SELECT
+            q.visit_id,
+            q.issue_code,
+            q.winning_event_id,
+            q.property_id,
+            q.contractor_id,
+            q.started_at,
+            q.ended_at,
+            b.source_file,
+            q.source_line_number,
+            q.issue_detail
+        FROM visit_quality_issues AS q
+        JOIN ingestion_batches AS b
+            ON b.batch_id = q.source_batch_id
+        ORDER BY q.visit_id, q.issue_code
+        """
+    ).fetchall()
+
+    category_counts = connection.execute(
+        """
+        SELECT issue_code, COUNT(*)
+        FROM visit_quality_issues
+        GROUP BY issue_code
+        ORDER BY issue_code
+        """
+    ).fetchall()
+
+    return [
+        "STAGE 6 - CURRENT VISIT BUSINESS QUALITY",
+        _separator("-"),
+        (
+            "Purpose: keep evidence of well-formed but business-invalid current "
+            "visits and exclude them from reporting metrics."
+        ),
+        "",
+        "Overall totals:",
+        f"  Current active visits              : {active}",
+        f"  Business-quality issue rows        : {issue_rows}",
+        f"  Active visits affected             : {affected}",
+        f"  Reportable active visits           : {reportable}",
+        f"  Deleted visit tombstones           : {deleted}",
+        f"  Valid unfinished reportable visits : {unfinished_reportable}",
+        "",
+        "Issue-category summary:",
+        format_text_table(
+            headers=["Issue code", "Count", "Meaning"],
+            rows=[
+                (
+                    issue_code,
+                    count,
+                    {
+                        "unknown_property": "property_id is not in src_properties",
+                        "unknown_contractor": "contractor_id is not in src_contractors",
+                        "end_before_start": "ended_at is earlier than started_at",
+                    }[issue_code],
+                )
+                for issue_code, count in category_counts
+            ],
+            widths=[22, 7, 58],
+        ),
+        "",
+        "Business-quality issue evidence:",
+        format_text_table(
+            headers=[
+                "Visit",
+                "Issue",
+                "Started UTC",
+                "Ended UTC",
+                "Duration min",
+                "Property",
+                "Contractor",
+                "Source reference",
+                "Reason",
+            ],
+            rows=[
+                (
+                    visit_id,
+                    issue_code,
+                    _format_utc(started_at),
+                    _format_utc(ended_at),
+                    _duration_minutes(started_at, ended_at),
+                    property_id,
+                    contractor_id,
+                    f"{source_file}:{line_number}",
+                    detail,
+                )
+                for (
+                    visit_id,
+                    issue_code,
+                    winning_event_id,
+                    property_id,
+                    contractor_id,
+                    started_at,
+                    ended_at,
+                    source_file,
+                    line_number,
+                    detail,
+                ) in issues
+            ],
+            widths=[8, 20, 20, 20, 12, 12, 12, 42, 46],
+        ),
+        "",
+        (
+            "Deleted visits are excluded from active reporting but are not "
+            "business-quality failures."
+        ),
+        (
+            "Unfinished visits (ended_at = NULL) remain valid and are kept in "
+            "reportable_current_visits."
+        ),
+    ]
+
 def build_report_text(
     connection: duckdb.DuckDBPyConnection,
 ) -> str:
@@ -893,6 +1087,9 @@ def build_report_text(
 
     if _has_stage5_results(connection):
         sections.append(_stage_5_lines(connection))
+
+    if _has_stage6_results(connection):
+        sections.append(_stage_6_lines(connection))
 
     return "\n\n".join("\n".join(section) for section in sections).rstrip() + "\n"
 

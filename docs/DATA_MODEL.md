@@ -462,3 +462,97 @@ is extended with:
 The report is regenerated from database state rather than appended as an
 unstructured log.
 
+---
+
+## Stage 6 — Business quality on current active visits
+
+### Scope
+
+Stage 6 evaluates the **latest active visit state** produced by Stage 5.
+
+These records are already technically valid source events. Stage 6 asks whether
+their business references and duration are suitable for reporting.
+
+The assignment defines three business-quality failures:
+
+- unknown property reference;
+- unknown contractor reference;
+- completed visit where `ended_at < started_at`.
+
+Deleted visits are not quality failures. An unfinished visit with
+`ended_at = NULL` is valid.
+
+### `visit_quality_issues`
+
+**Grain:** one business-quality issue per `visit_id` + `issue_code`.
+
+Primary key:
+
+```text
+(visit_id, issue_code)
+```
+
+The table preserves:
+
+- affected visit;
+- issue code and explanation;
+- winning/current event ID;
+- source batch and line;
+- property/contractor values;
+- visit start/end timestamps.
+
+For `end_before_start`, the console and cumulative audit report show the exact
+UTC start/end timestamps and elapsed minutes. For `V11`, the evidence is:
+
+```text
+started_at = 2026-03-25T01:00:00Z
+ended_at   = 2026-03-25T00:00:00Z
+duration   = -60.0 minutes
+```
+
+### `reportable_current_visits`
+
+**Grain:** one latest active visit that passes all Stage 6 business-quality checks.
+
+This is a view over `visit_current_state`:
+
+```text
+active current visits
+MINUS
+visits present in visit_quality_issues
+```
+
+Deleted visits and business-invalid active visits therefore do not enter visit
+metrics, while unfinished valid visits remain included.
+
+### Expected Stage 6 results
+
+```text
+1,618 current visit states
+   51 deleted tombstones
+1,567 active current visits
+    3 active visits with business-quality issues
+1,564 reportable active visits
+```
+
+The three affected visits are:
+
+```text
+V11 -> end_before_start
+V12 -> unknown_property
+V13 -> unknown_contractor
+```
+
+### Audit evidence
+
+The cumulative `reports/Report.txt` is extended with:
+
+- active/deleted/reportable counts;
+- issue counts by category;
+- each affected visit;
+- winning event and exact source reference;
+- the reason the visit is excluded from metrics.
+
+The source/current-state record is preserved. Stage 6 excludes bad business
+records from reporting; it does not erase them.
+

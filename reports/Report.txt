@@ -648,3 +648,41 @@ Deleted current-state tombstones:
 
 Precedence rule: an incoming event changes visit_current_state only when source_version is strictly greater than the current version.
 A delete remains as a tombstone; an older upsert cannot resurrect it. A genuinely newer upsert can reactivate the visit.
+
+STAGE 6 - CURRENT VISIT BUSINESS QUALITY
+----------------------------------------------------------------------------------------------------------------
+Purpose: keep evidence of well-formed but business-invalid current visits and exclude them from reporting metrics.
+
+Overall totals:
+  Current active visits              : 1567
+  Business-quality issue rows        : 3
+  Active visits affected             : 3
+  Reportable active visits           : 1564
+  Deleted visit tombstones           : 51
+  Valid unfinished reportable visits : 92
+
+Issue-category summary:
++------------------------+---------+------------------------------------------------------------+
+| Issue code             | Count   | Meaning                                                    |
++------------------------+---------+------------------------------------------------------------+
+| end_before_start       | 1       | ended_at is earlier than started_at                        |
++------------------------+---------+------------------------------------------------------------+
+| unknown_contractor     | 1       | contractor_id is not in src_contractors                    |
++------------------------+---------+------------------------------------------------------------+
+| unknown_property       | 1       | property_id is not in src_properties                       |
++------------------------+---------+------------------------------------------------------------+
+
+Business-quality issue evidence:
++----------+----------------------+----------------------+----------------------+--------------+--------------+--------------+--------------------------------------------+------------------------------------------------+
+| Visit    | Issue                | Started UTC          | Ended UTC            | Duration min | Property     | Contractor   | Source reference                           | Reason                                         |
++----------+----------------------+----------------------+----------------------+--------------+--------------+--------------+--------------------------------------------+------------------------------------------------+
+| V11      | end_before_start     | 2026-03-25T01:00:00Z | 2026-03-25T00:00:00Z | -60.0        | P01          | K01          | data/visit_changes/batch_01.jsonl:270      | ended_at is earlier than started_at            |
++----------+----------------------+----------------------+----------------------+--------------+--------------+--------------+--------------------------------------------+------------------------------------------------+
+| V12      | unknown_property     | 2026-03-25T01:00:00Z | 2026-03-25T02:00:00Z | 60.0         | P_UNKNOWN    | K01          | data/visit_changes/batch_01.jsonl:296      | property_id does not exist in src_properties   |
++----------+----------------------+----------------------+----------------------+--------------+--------------+--------------+--------------------------------------------+------------------------------------------------+
+| V13      | unknown_contractor   | 2026-03-25T01:00:00Z | 2026-03-25T02:00:00Z | 60.0         | P02          | K_UNKNOWN    | data/visit_changes/batch_01.jsonl:242      | contractor_id does not exist in                |
+|          |                      |                      |                      |              |              |              |                                            | src_contractors                                |
++----------+----------------------+----------------------+----------------------+--------------+--------------+--------------+--------------------------------------------+------------------------------------------------+
+
+Deleted visits are excluded from active reporting but are not business-quality failures.
+Unfinished visits (ended_at = NULL) remain valid and are kept in reportable_current_visits.
