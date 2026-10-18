@@ -199,7 +199,7 @@ working correctly.
 | 2. Persistent source layer | Create DuckDB and load/validate the six static/reference CSV sources | `sql/schema.sql`, `src/database.py`, `src/load_reference_data.py` | **Done** |
 | 3. Visit batch ingestion | Read `manifest.json`, land all physical JSONL lines in order and record replay/restart-safe batch progress | `ingestion_batches`, `raw_visit_lines`, landing code/tests | **Done** |
 | 4. Technical validation | Parse landed lines, retain valid source events and record technical rejects with evidence | `validated_visit_events`, `visit_event_rejects` | **Done** |
-| 5. Versioning, duplicates and deletes | Make replay safe; handle repeated `event_id`, `source_version`, delete and reactivation rules | Event history and current visit state | Not started |
+| 5. Versioning, duplicates and deletes | Deduplicate global `event_id`, apply highest `source_version` per visit and retain delete tombstones/reactivation | `visit_events`, `visit_event_duplicates`, `visit_current_state` | **In progress** |
 | 6. Business data quality | Flag unknown references and invalid durations while preserving evidence | Quality-issue model | Not started |
 | 7. Management history | Convert observations into historical management intervals and current management | Historical/current management models | Not started |
 | 8. Analytical facts | Attribute visits/incidents historically, apply local week rules and UTC elapsed hours | Visit and incident facts | Not started |
@@ -249,9 +249,17 @@ working correctly.
 - [x] Confirm Stage 4 tests pass (`12 passed`)
 - [x] Confirm full regression suite passes (`29 passed`)
 
+### Current stage
+
+- [ ] Deduplicate repeated global `event_id` deliveries
+- [ ] Apply highest `source_version` per `visit_id`
+- [ ] Preserve delete tombstones and allow genuinely newer reactivation
+- [ ] Show duplicate/stale evidence in the console and cumulative `reports/Report.txt`
+- [ ] Confirm Stage 5 rollback/restart and replay tests
+
 ### Next
 
-- [ ] Deduplicate repeated `event_id` deliveries and apply `source_version` precedence
+- [ ] Add business-quality checks for unknown references and invalid duration
 - [ ] Record technical rejects and loading counts
 - [ ] Implement idempotent replay and restart-safe batches
 - [ ] Maintain latest visit state using `source_version`
@@ -634,6 +642,115 @@ Stage 5 answers:
 
 ---
 
+## Stage 5 — Deduplication, version precedence and current visit state
+
+### Aim
+
+Convert technically valid physical deliveries into:
+
+1. one globally unique event-history row per `event_id`; and
+2. one highest-version current state per `visit_id`.
+
+### Why this stage exists
+
+A delivered line is not necessarily a new business event or a new visit.
+
+- the same `event_id` may be delivered repeatedly;
+- different unique events may refer to the same `visit_id`;
+- lower versions can arrive after higher versions;
+- deletes must remain as tombstones;
+- a genuinely newer upsert may reactivate a deleted visit.
+
+The precedence rule is:
+
+```text
+highest source_version per visit_id wins
+```
+
+### New tables
+
+| Table | Grain | Purpose |
+| --- | --- | --- |
+| `visit_events` | One globally unique `event_id` | Deduplicated event history plus applied/stale outcome |
+| `visit_event_duplicates` | One repeated physical delivery | Duplicate evidence linked to the canonical first event |
+| `visit_current_state` | One `visit_id` | Highest-version current state, including delete tombstones |
+
+### Flow
+
+```text
+validated_visit_events
+          |
+          v
+src/process_visit_state.py
+          |
+          +-----------------------------+
+          |              |              |
+          v              v              v
+     visit_events   duplicate audit   visit_current_state
+          |
+          +----> reports/Report.txt
+          |
+          v
+tests/test_visit_state.py
+```
+
+### Expected results
+
+```text
+1,979 technically valid physical deliveries
+1,944 unique event IDs
+35 duplicate deliveries
+
+1,890 applied state changes
+54 stale/equal-version unique events
+
+1,618 current visit states
+1,567 active visits
+51 deleted visits
+```
+
+The console and cumulative `reports/Report.txt` show:
+
+- per-batch unique/duplicate/applied/stale counts;
+- every duplicate delivery with duplicate and canonical source references;
+- every stale/equal-version unique event with source reference and reason;
+- V02/V03/V04 version/delete examples;
+- deleted current-state tombstones in the report.
+
+### Run
+
+```powershell
+python -m src.process_visit_state
+```
+
+Then:
+
+```powershell
+python -m pytest tests/test_visit_state.py -q
+python -m pytest -q
+```
+
+Finally rerun:
+
+```powershell
+python -m src.process_visit_state
+```
+
+The second run should show every batch as `skipped`.
+
+### Boundary
+
+Stage 5 answers:
+
+> Which deliveries are repeated events, and what is the highest-version source
+> state of each visit?
+
+Stage 6 answers:
+
+> Is each latest active visit valid for business reporting?
+
+---
+
 ## How to run the project currently
 
 From the repository root:
@@ -647,6 +764,7 @@ python -m src.verify_sources
 python -m src.load_reference_data
 python -m src.land_visit_batches
 python -m src.validate_visit_events
+python -m src.process_visit_state
 python -m pytest -q
 ```
 
@@ -692,11 +810,13 @@ eventually rebuild the complete project from a fresh checkout.
 │   ├── database.py
 │   ├── land_visit_batches.py
 │   ├── load_reference_data.py
+│   ├── process_visit_state.py
 │   ├── validate_visit_events.py
 │   └── verify_sources.py
 ├── tests/
 │   ├── test_batch_landing.py
 │   ├── test_reference_data.py
+│   ├── test_visit_state.py
 │   └── test_visit_validation.py
 ├── .gitattributes
 ├── .gitignore

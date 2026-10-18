@@ -67,17 +67,17 @@ Purpose: preserve every physical JSONL line in manifest order before parsing.
 +----------+-------+------------+--------+-----------+----------+----------------------------------------+
 | Batch    | Order | Snapshot   | Lines  | Status    | Attempts | Source file                            |
 +----------+-------+------------+--------+-----------+----------+----------------------------------------+
-| batch_01 | 1     | 2026-04-13 | 381    | landed    | 1        | data/visit_changes/batch_01.jsonl      |
+| batch_01 | 1     | 2026-04-13 | 381    | completed | 1        | data/visit_changes/batch_01.jsonl      |
 +----------+-------+------------+--------+-----------+----------+----------------------------------------+
-| batch_02 | 2     | 2026-04-14 | 323    | landed    | 1        | data/visit_changes/batch_02.jsonl      |
+| batch_02 | 2     | 2026-04-14 | 323    | completed | 1        | data/visit_changes/batch_02.jsonl      |
 +----------+-------+------------+--------+-----------+----------+----------------------------------------+
-| batch_03 | 3     | 2026-04-15 | 323    | landed    | 1        | data/visit_changes/batch_03.jsonl      |
+| batch_03 | 3     | 2026-04-15 | 323    | completed | 1        | data/visit_changes/batch_03.jsonl      |
 +----------+-------+------------+--------+-----------+----------+----------------------------------------+
-| batch_04 | 4     | 2026-04-16 | 323    | landed    | 1        | data/visit_changes/batch_04.jsonl      |
+| batch_04 | 4     | 2026-04-16 | 323    | completed | 1        | data/visit_changes/batch_04.jsonl      |
 +----------+-------+------------+--------+-----------+----------+----------------------------------------+
-| batch_05 | 5     | 2026-04-17 | 323    | landed    | 1        | data/visit_changes/batch_05.jsonl      |
+| batch_05 | 5     | 2026-04-17 | 323    | completed | 1        | data/visit_changes/batch_05.jsonl      |
 +----------+-------+------------+--------+-----------+----------+----------------------------------------+
-| batch_06 | 6     | 2026-04-18 | 324    | landed    | 1        | data/visit_changes/batch_06.jsonl      |
+| batch_06 | 6     | 2026-04-18 | 324    | completed | 1        | data/visit_changes/batch_06.jsonl      |
 +----------+-------+------------+--------+-----------+----------+----------------------------------------+
 
 Raw physical visit lines preserved: 1997
@@ -217,3 +217,434 @@ Reference format is <source_file>:<line_number>. The raw source files remain unc
 
 Validation replay behavior: already-validated batches are a no-op.
 Boundary: unknown business references and invalid visit duration are not Stage 4 technical rejects.
+
+STAGE 5 - EVENT DEDUPLICATION AND CURRENT VISIT STATE
+----------------------------------------------------------------------------------------------------------------
+Purpose: count repeated global event deliveries once and maintain the highest source_version for each visit.
+
+Per-batch processing summary:
++----------+----------+------------+----------+---------+------------+
+| Batch    | Unique   | Duplicates | Applied  | Stale   | Status     |
++----------+----------+------------+----------+---------+------------+
+| batch_01 | 368      | 10         | 368      | 0       | completed  |
++----------+----------+------------+----------+---------+------------+
+| batch_02 | 315      | 5          | 295      | 20      | completed  |
++----------+----------+------------+----------+---------+------------+
+| batch_03 | 315      | 5          | 307      | 8       | completed  |
++----------+----------+------------+----------+---------+------------+
+| batch_04 | 315      | 5          | 305      | 10      | completed  |
++----------+----------+------------+----------+---------+------------+
+| batch_05 | 315      | 5          | 308      | 7       | completed  |
++----------+----------+------------+----------+---------+------------+
+| batch_06 | 316      | 5          | 307      | 9       | completed  |
++----------+----------+------------+----------+---------+------------+
+
+Overall totals:
+  Technically valid physical deliveries : 1979
+  Globally unique event IDs             : 1944
+  Duplicate deliveries                  : 35
+  Applied unique state changes          : 1890
+  Stale/equal-version unique events     : 54
+    - lower-version stale events        : 49
+    - equal-version stale events        : 5
+  Distinct current visit states         : 1618
+  Active current visit states           : 1567
+  Deleted current visit states          : 51
+
+Key version/delete/reactivation examples:
++----------+----------+------------+----------+----------------+--------------------------------------------+
+| Visit    | Version  | Operation  | Deleted  | Winning event  | Winning source                             |
++----------+----------+------------+----------+----------------+--------------------------------------------+
+| V02      | 2        | delete     | True     | E00683         | data/visit_changes/batch_02.jsonl:103      |
++----------+----------+------------+----------+----------------+--------------------------------------------+
+| V03      | 2        | upsert     | False    | E00998         | data/visit_changes/batch_03.jsonl:247      |
++----------+----------+------------+----------+----------------+--------------------------------------------+
+| V04      | 3        | upsert     | False    | E01628         | data/visit_changes/batch_05.jsonl:305      |
++----------+----------+------------+----------+----------------+--------------------------------------------+
+
+Duplicate-delivery evidence:
++-----+--------------+-------------------------------------------+-------------------------------------------+----------------------------------------------------+
+| #   | Event ID     | Duplicate source                          | Canonical source                          | Reason                                             |
++-----+--------------+-------------------------------------------+-------------------------------------------+----------------------------------------------------+
+| 1   | E00169       | data/visit_changes/batch_01.jsonl:48      | data/visit_changes/batch_01.jsonl:32      | Repeated delivery of an already-known global       |
+|     |              |                                           |                                           | event_id.                                          |
++-----+--------------+-------------------------------------------+-------------------------------------------+----------------------------------------------------+
+| 2   | E00003       | data/visit_changes/batch_01.jsonl:131     | data/visit_changes/batch_01.jsonl:78      | Repeated delivery of an already-known global       |
+|     |              |                                           |                                           | event_id.                                          |
++-----+--------------+-------------------------------------------+-------------------------------------------+----------------------------------------------------+
+| 3   | E00319       | data/visit_changes/batch_01.jsonl:140     | data/visit_changes/batch_01.jsonl:84      | Repeated delivery of an already-known global       |
+|     |              |                                           |                                           | event_id.                                          |
++-----+--------------+-------------------------------------------+-------------------------------------------+----------------------------------------------------+
+| 4   | E00269       | data/visit_changes/batch_01.jsonl:171     | data/visit_changes/batch_01.jsonl:123     | Repeated delivery of an already-known global       |
+|     |              |                                           |                                           | event_id.                                          |
++-----+--------------+-------------------------------------------+-------------------------------------------+----------------------------------------------------+
+| 5   | E00119       | data/visit_changes/batch_01.jsonl:218     | data/visit_changes/batch_01.jsonl:189     | Repeated delivery of an already-known global       |
+|     |              |                                           |                                           | event_id.                                          |
++-----+--------------+-------------------------------------------+-------------------------------------------+----------------------------------------------------+
+| 6   | E00219       | data/visit_changes/batch_01.jsonl:237     | data/visit_changes/batch_01.jsonl:156     | Repeated delivery of an already-known global       |
+|     |              |                                           |                                           | event_id.                                          |
++-----+--------------+-------------------------------------------+-------------------------------------------+----------------------------------------------------+
+| 7   | E00069       | data/visit_changes/batch_01.jsonl:244     | data/visit_changes/batch_01.jsonl:116     | Repeated delivery of an already-known global       |
+|     |              |                                           |                                           | event_id.                                          |
++-----+--------------+-------------------------------------------+-------------------------------------------+----------------------------------------------------+
+| 8   | E00019       | data/visit_changes/batch_01.jsonl:246     | data/visit_changes/batch_01.jsonl:196     | Repeated delivery of an already-known global       |
+|     |              |                                           |                                           | event_id.                                          |
++-----+--------------+-------------------------------------------+-------------------------------------------+----------------------------------------------------+
+| 9   | E00001       | data/visit_changes/batch_01.jsonl:261     | data/visit_changes/batch_01.jsonl:207     | Repeated delivery of an already-known global       |
+|     |              |                                           |                                           | event_id.                                          |
++-----+--------------+-------------------------------------------+-------------------------------------------+----------------------------------------------------+
+| 10  | E00002       | data/visit_changes/batch_01.jsonl:360     | data/visit_changes/batch_01.jsonl:179     | Repeated delivery of an already-known global       |
+|     |              |                                           |                                           | event_id.                                          |
++-----+--------------+-------------------------------------------+-------------------------------------------+----------------------------------------------------+
+| 11  | E00469       | data/visit_changes/batch_02.jsonl:141     | data/visit_changes/batch_02.jsonl:125     | Repeated delivery of an already-known global       |
+|     |              |                                           |                                           | event_id.                                          |
++-----+--------------+-------------------------------------------+-------------------------------------------+----------------------------------------------------+
+| 12  | E00569       | data/visit_changes/batch_02.jsonl:268     | data/visit_changes/batch_02.jsonl:231     | Repeated delivery of an already-known global       |
+|     |              |                                           |                                           | event_id.                                          |
++-----+--------------+-------------------------------------------+-------------------------------------------+----------------------------------------------------+
+| 13  | E00369       | data/visit_changes/batch_02.jsonl:280     | data/visit_changes/batch_02.jsonl:134     | Repeated delivery of an already-known global       |
+|     |              |                                           |                                           | event_id.                                          |
++-----+--------------+-------------------------------------------+-------------------------------------------+----------------------------------------------------+
+| 14  | E00519       | data/visit_changes/batch_02.jsonl:281     | data/visit_changes/batch_02.jsonl:108     | Repeated delivery of an already-known global       |
+|     |              |                                           |                                           | event_id.                                          |
++-----+--------------+-------------------------------------------+-------------------------------------------+----------------------------------------------------+
+| 15  | E00419       | data/visit_changes/batch_02.jsonl:289     | data/visit_changes/batch_02.jsonl:67      | Repeated delivery of an already-known global       |
+|     |              |                                           |                                           | event_id.                                          |
++-----+--------------+-------------------------------------------+-------------------------------------------+----------------------------------------------------+
+| 16  | E00884       | data/visit_changes/batch_03.jsonl:35      | data/visit_changes/batch_03.jsonl:17      | Repeated delivery of an already-known global       |
+|     |              |                                           |                                           | event_id.                                          |
++-----+--------------+-------------------------------------------+-------------------------------------------+----------------------------------------------------+
+| 17  | E00734       | data/visit_changes/batch_03.jsonl:62      | data/visit_changes/batch_03.jsonl:55      | Repeated delivery of an already-known global       |
+|     |              |                                           |                                           | event_id.                                          |
++-----+--------------+-------------------------------------------+-------------------------------------------+----------------------------------------------------+
+| 18  | E00684       | data/visit_changes/batch_03.jsonl:129     | data/visit_changes/batch_03.jsonl:29      | Repeated delivery of an already-known global       |
+|     |              |                                           |                                           | event_id.                                          |
++-----+--------------+-------------------------------------------+-------------------------------------------+----------------------------------------------------+
+| 19  | E00784       | data/visit_changes/batch_03.jsonl:161     | data/visit_changes/batch_03.jsonl:59      | Repeated delivery of an already-known global       |
+|     |              |                                           |                                           | event_id.                                          |
++-----+--------------+-------------------------------------------+-------------------------------------------+----------------------------------------------------+
+| 20  | E00834       | data/visit_changes/batch_03.jsonl:319     | data/visit_changes/batch_03.jsonl:108     | Repeated delivery of an already-known global       |
+|     |              |                                           |                                           | event_id.                                          |
++-----+--------------+-------------------------------------------+-------------------------------------------+----------------------------------------------------+
+| 21  | E01149       | data/visit_changes/batch_04.jsonl:40      | data/visit_changes/batch_04.jsonl:35      | Repeated delivery of an already-known global       |
+|     |              |                                           |                                           | event_id.                                          |
++-----+--------------+-------------------------------------------+-------------------------------------------+----------------------------------------------------+
+| 22  | E01099       | data/visit_changes/batch_04.jsonl:171     | data/visit_changes/batch_04.jsonl:97      | Repeated delivery of an already-known global       |
+|     |              |                                           |                                           | event_id.                                          |
++-----+--------------+-------------------------------------------+-------------------------------------------+----------------------------------------------------+
+| 23  | E01199       | data/visit_changes/batch_04.jsonl:245     | data/visit_changes/batch_04.jsonl:36      | Repeated delivery of an already-known global       |
+|     |              |                                           |                                           | event_id.                                          |
++-----+--------------+-------------------------------------------+-------------------------------------------+----------------------------------------------------+
+| 24  | E01049       | data/visit_changes/batch_04.jsonl:249     | data/visit_changes/batch_04.jsonl:216     | Repeated delivery of an already-known global       |
+|     |              |                                           |                                           | event_id.                                          |
++-----+--------------+-------------------------------------------+-------------------------------------------+----------------------------------------------------+
+| 25  | E00999       | data/visit_changes/batch_04.jsonl:315     | data/visit_changes/batch_04.jsonl:39      | Repeated delivery of an already-known global       |
+|     |              |                                           |                                           | event_id.                                          |
++-----+--------------+-------------------------------------------+-------------------------------------------+----------------------------------------------------+
+| 26  | E01414       | data/visit_changes/batch_05.jsonl:62      | data/visit_changes/batch_05.jsonl:53      | Repeated delivery of an already-known global       |
+|     |              |                                           |                                           | event_id.                                          |
++-----+--------------+-------------------------------------------+-------------------------------------------+----------------------------------------------------+
+| 27  | E01364       | data/visit_changes/batch_05.jsonl:88      | data/visit_changes/batch_05.jsonl:40      | Repeated delivery of an already-known global       |
+|     |              |                                           |                                           | event_id.                                          |
++-----+--------------+-------------------------------------------+-------------------------------------------+----------------------------------------------------+
+| 28  | E01514       | data/visit_changes/batch_05.jsonl:230     | data/visit_changes/batch_05.jsonl:69      | Repeated delivery of an already-known global       |
+|     |              |                                           |                                           | event_id.                                          |
++-----+--------------+-------------------------------------------+-------------------------------------------+----------------------------------------------------+
+| 29  | E01464       | data/visit_changes/batch_05.jsonl:270     | data/visit_changes/batch_05.jsonl:208     | Repeated delivery of an already-known global       |
+|     |              |                                           |                                           | event_id.                                          |
++-----+--------------+-------------------------------------------+-------------------------------------------+----------------------------------------------------+
+| 30  | E01314       | data/visit_changes/batch_05.jsonl:278     | data/visit_changes/batch_05.jsonl:183     | Repeated delivery of an already-known global       |
+|     |              |                                           |                                           | event_id.                                          |
++-----+--------------+-------------------------------------------+-------------------------------------------+----------------------------------------------------+
+| 31  | E01829       | data/visit_changes/batch_06.jsonl:165     | data/visit_changes/batch_06.jsonl:75      | Repeated delivery of an already-known global       |
+|     |              |                                           |                                           | event_id.                                          |
++-----+--------------+-------------------------------------------+-------------------------------------------+----------------------------------------------------+
+| 32  | E01679       | data/visit_changes/batch_06.jsonl:193     | data/visit_changes/batch_06.jsonl:34      | Repeated delivery of an already-known global       |
+|     |              |                                           |                                           | event_id.                                          |
++-----+--------------+-------------------------------------------+-------------------------------------------+----------------------------------------------------+
+| 33  | E01729       | data/visit_changes/batch_06.jsonl:217     | data/visit_changes/batch_06.jsonl:155     | Repeated delivery of an already-known global       |
+|     |              |                                           |                                           | event_id.                                          |
++-----+--------------+-------------------------------------------+-------------------------------------------+----------------------------------------------------+
+| 34  | E01779       | data/visit_changes/batch_06.jsonl:248     | data/visit_changes/batch_06.jsonl:117     | Repeated delivery of an already-known global       |
+|     |              |                                           |                                           | event_id.                                          |
++-----+--------------+-------------------------------------------+-------------------------------------------+----------------------------------------------------+
+| 35  | E01629       | data/visit_changes/batch_06.jsonl:279     | data/visit_changes/batch_06.jsonl:8       | Repeated delivery of an already-known global       |
+|     |              |                                           |                                           | event_id.                                          |
++-----+--------------+-------------------------------------------+-------------------------------------------+----------------------------------------------------+
+
+Stale/equal-version evidence:
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| #   | Visit    | Event ID     | Incoming | Existing | Op      | Source reference                          | Reason                                             |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 1   | SYN_V002 | E00680       | 1        | 1        | upsert  | data/visit_changes/batch_02.jsonl:19      | equal source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 2   | SYN_V002 | E00682       | 1        | 1        | upsert  | data/visit_changes/batch_02.jsonl:21      | equal source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 3   | SYN_V005 | E00550       | 1        | 2        | upsert  | data/visit_changes/batch_02.jsonl:71      | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 4   | SYN_V005 | E00585       | 1        | 1        | upsert  | data/visit_changes/batch_02.jsonl:143     | equal source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 5   | SYN_V005 | E00564       | 1        | 2        | upsert  | data/visit_changes/batch_02.jsonl:145     | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 6   | SYN_V005 | E00590       | 1        | 2        | upsert  | data/visit_changes/batch_02.jsonl:164     | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 7   | SYN_V003 | E00402       | 1        | 2        | upsert  | data/visit_changes/batch_02.jsonl:177     | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 8   | SYN_V004 | E00451       | 1        | 2        | upsert  | data/visit_changes/batch_02.jsonl:197     | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 9   | SYN_V004 | E00477       | 1        | 2        | upsert  | data/visit_changes/batch_02.jsonl:208     | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 10  | SYN_V005 | E00577       | 1        | 2        | upsert  | data/visit_changes/batch_02.jsonl:218     | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 11  | SYN_V005 | E00613       | 1        | 2        | upsert  | data/visit_changes/batch_02.jsonl:234     | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 12  | SYN_V003 | E00392       | 1        | 2        | upsert  | data/visit_changes/batch_02.jsonl:251     | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 13  | SYN_V005 | E00530       | 1        | 2        | upsert  | data/visit_changes/batch_02.jsonl:274     | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 14  | SYN_V005 | E00604       | 1        | 2        | upsert  | data/visit_changes/batch_02.jsonl:290     | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 15  | SYN_V005 | E00563       | 1        | 2        | upsert  | data/visit_changes/batch_02.jsonl:292     | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 16  | SYN_V004 | E00511       | 1        | 2        | upsert  | data/visit_changes/batch_02.jsonl:293     | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 17  | SYN_V003 | E00681       | 1        | 2        | upsert  | data/visit_changes/batch_02.jsonl:298     | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 18  | SYN_V003 | E00383       | 1        | 2        | upsert  | data/visit_changes/batch_02.jsonl:302     | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 19  | SYN_V004 | E00479       | 1        | 2        | upsert  | data/visit_changes/batch_02.jsonl:307     | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 20  | SYN_V005 | E00614       | 1        | 2        | upsert  | data/visit_changes/batch_02.jsonl:308     | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 21  | SYN_V005 | E00997       | 1        | 1        | upsert  | data/visit_changes/batch_03.jsonl:1       | equal source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 22  | SYN_V002 | E00996       | 1        | 2        | upsert  | data/visit_changes/batch_03.jsonl:2       | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 23  | SYN_V008 | E00963       | 2        | 3        | upsert  | data/visit_changes/batch_03.jsonl:94      | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 24  | SYN_V006 | E00719       | 1        | 2        | upsert  | data/visit_changes/batch_03.jsonl:134     | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 25  | SYN_V006 | E00688       | 1        | 2        | upsert  | data/visit_changes/batch_03.jsonl:199     | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 26  | SYN_V008 | E00995       | 1        | 1        | upsert  | data/visit_changes/batch_03.jsonl:202     | equal source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 27  | SYN_V007 | E00822       | 1        | 2        | upsert  | data/visit_changes/batch_03.jsonl:234     | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 28  | SYN_V002 | E00994       | 1        | 2        | upsert  | data/visit_changes/batch_03.jsonl:286     | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 29  | SYN_V005 | E01311       | 1        | 2        | upsert  | data/visit_changes/batch_04.jsonl:3       | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 30  | SYN_V010 | E01165       | 1        | 2        | upsert  | data/visit_changes/batch_04.jsonl:61      | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 31  | SYN_V008 | E01043       | 1        | 2        | upsert  | data/visit_changes/batch_04.jsonl:66      | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 32  | SYN_V002 | E01310       | 1        | 2        | upsert  | data/visit_changes/batch_04.jsonl:86      | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 33  | SYN_V009 | E01109       | 1        | 2        | upsert  | data/visit_changes/batch_04.jsonl:183     | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 34  | SYN_V009 | E01117       | 1        | 2        | upsert  | data/visit_changes/batch_04.jsonl:198     | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 35  | SYN_V005 | E01312       | 1        | 3        | upsert  | data/visit_changes/batch_04.jsonl:282     | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 36  | SYN_V010 | E01168       | 1        | 2        | upsert  | data/visit_changes/batch_04.jsonl:284     | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 37  | SYN_V005 | E01309       | 1        | 2        | upsert  | data/visit_changes/batch_04.jsonl:292     | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 38  | SYN_V009 | E01114       | 1        | 2        | upsert  | data/visit_changes/batch_04.jsonl:295     | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 39  | SYN_V011 | E01334       | 1        | 2        | upsert  | data/visit_changes/batch_05.jsonl:102     | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 40  | SYN_V011 | E01626       | 1        | 2        | upsert  | data/visit_changes/batch_05.jsonl:164     | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 41  | SYN_V000 | E01627       | 1        | 2        | upsert  | data/visit_changes/batch_05.jsonl:209     | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 42  | SYN_V011 | E01350       | 1        | 2        | upsert  | data/visit_changes/batch_05.jsonl:213     | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 43  | SYN_V011 | E01387       | 1        | 2        | upsert  | data/visit_changes/batch_05.jsonl:216     | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 44  | SYN_V003 | E01625       | 1        | 2        | upsert  | data/visit_changes/batch_05.jsonl:246     | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 45  | SYN_V007 | E01624       | 1        | 2        | upsert  | data/visit_changes/batch_05.jsonl:269     | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 46  | SYN_V007 | E01941       | 1        | 2        | upsert  | data/visit_changes/batch_06.jsonl:17      | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 47  | V02      | E01943       | 1        | 2        | upsert  | data/visit_changes/batch_06.jsonl:68      | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 48  | SYN_V015 | E01828       | 1        | 2        | upsert  | data/visit_changes/batch_06.jsonl:112     | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 49  | SYN_V009 | E01940       | 1        | 2        | upsert  | data/visit_changes/batch_06.jsonl:124     | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 50  | SYN_V005 | E01939       | 1        | 3        | upsert  | data/visit_changes/batch_06.jsonl:228     | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 51  | V04      | E01944       | 1        | 3        | upsert  | data/visit_changes/batch_06.jsonl:266     | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 52  | SYN_V003 | E01942       | 1        | 2        | upsert  | data/visit_changes/batch_06.jsonl:272     | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 53  | SYN_V015 | E01819       | 1        | 2        | upsert  | data/visit_changes/batch_06.jsonl:296     | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+| 54  | SYN_V014 | E01754       | 1        | 2        | upsert  | data/visit_changes/batch_06.jsonl:314     | lower source_version: incoming version does not    |
+|     |          |              |          |          |         |                                           | exceed the current visit version.                  |
++-----+----------+--------------+----------+----------+---------+-------------------------------------------+----------------------------------------------------+
+
+Deleted current-state tombstones:
++------------+----------+----------------+----------------------------------------------+
+| Visit      | Version  | Winning event  | Winning source                               |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00024 | 2        | E00670         | data/visit_changes/batch_02.jsonl:226        |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00029 | 3        | E01935         | data/visit_changes/batch_06.jsonl:57         |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00048 | 2        | E00990         | data/visit_changes/batch_03.jsonl:284        |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00078 | 2        | E00985         | data/visit_changes/batch_03.jsonl:278        |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00081 | 2        | E01614         | data/visit_changes/batch_05.jsonl:210        |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00156 | 2        | E01304         | data/visit_changes/batch_04.jsonl:18         |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00172 | 2        | E00675         | data/visit_changes/batch_02.jsonl:256        |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00218 | 2        | E00672         | data/visit_changes/batch_02.jsonl:74         |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00235 | 2        | E00991         | data/visit_changes/batch_03.jsonl:54         |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00261 | 2        | E00988         | data/visit_changes/batch_03.jsonl:294        |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00275 | 2        | E01931         | data/visit_changes/batch_06.jsonl:53         |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00281 | 2        | E01305         | data/visit_changes/batch_04.jsonl:59         |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00317 | 2        | E00673         | data/visit_changes/batch_02.jsonl:194        |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00407 | 2        | E01307         | data/visit_changes/batch_04.jsonl:94         |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00417 | 2        | E01302         | data/visit_changes/batch_04.jsonl:185        |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00437 | 2        | E01300         | data/visit_changes/batch_04.jsonl:13         |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00445 | 2        | E01616         | data/visit_changes/batch_05.jsonl:192        |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00460 | 2        | E00677         | data/visit_changes/batch_02.jsonl:271        |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00469 | 2        | E01299         | data/visit_changes/batch_04.jsonl:118        |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00474 | 2        | E00987         | data/visit_changes/batch_03.jsonl:95         |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00511 | 2        | E00678         | data/visit_changes/batch_02.jsonl:140        |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00536 | 3        | E00992         | data/visit_changes/batch_03.jsonl:63         |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00544 | 3        | E01930         | data/visit_changes/batch_06.jsonl:91         |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00566 | 2        | E00669         | data/visit_changes/batch_02.jsonl:148        |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00567 | 2        | E00674         | data/visit_changes/batch_02.jsonl:278        |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00571 | 2        | E00671         | data/visit_changes/batch_02.jsonl:135        |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00577 | 2        | E00676         | data/visit_changes/batch_02.jsonl:90         |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00605 | 2        | E01929         | data/visit_changes/batch_06.jsonl:166        |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00615 | 2        | E00989         | data/visit_changes/batch_03.jsonl:112        |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00628 | 2        | E01933         | data/visit_changes/batch_06.jsonl:261        |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00635 | 2        | E00984         | data/visit_changes/batch_03.jsonl:42         |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00654 | 2        | E01936         | data/visit_changes/batch_06.jsonl:42         |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00676 | 2        | E00986         | data/visit_changes/batch_03.jsonl:254        |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00700 | 2        | E01306         | data/visit_changes/batch_04.jsonl:209        |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00751 | 2        | E01301         | data/visit_changes/batch_04.jsonl:312        |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00793 | 2        | E01937         | data/visit_changes/batch_06.jsonl:126        |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00825 | 3        | E00993         | data/visit_changes/batch_03.jsonl:89         |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00844 | 2        | E01623         | data/visit_changes/batch_05.jsonl:104        |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00854 | 2        | E01619         | data/visit_changes/batch_05.jsonl:174        |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00858 | 2        | E01620         | data/visit_changes/batch_05.jsonl:71         |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00876 | 2        | E01932         | data/visit_changes/batch_06.jsonl:74         |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00889 | 2        | E01622         | data/visit_changes/batch_05.jsonl:256        |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00959 | 2        | E01303         | data/visit_changes/batch_04.jsonl:19         |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V00998 | 2        | E01615         | data/visit_changes/batch_05.jsonl:97         |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V01089 | 2        | E01308         | data/visit_changes/batch_04.jsonl:311        |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V01120 | 2        | E01617         | data/visit_changes/batch_05.jsonl:22         |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V01130 | 2        | E01618         | data/visit_changes/batch_05.jsonl:296        |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V01205 | 2        | E01621         | data/visit_changes/batch_05.jsonl:199        |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V01260 | 2        | E01938         | data/visit_changes/batch_06.jsonl:254        |
++------------+----------+----------------+----------------------------------------------+
+| SYN_V01475 | 2        | E01934         | data/visit_changes/batch_06.jsonl:56         |
++------------+----------+----------------+----------------------------------------------+
+| V02        | 2        | E00683         | data/visit_changes/batch_02.jsonl:103        |
++------------+----------+----------------+----------------------------------------------+
+
+Precedence rule: an incoming event changes visit_current_state only when source_version is strictly greater than the current version.
+A delete remains as a tombstone; an older upsert cannot resurrect it. A genuinely newer upsert can reactivate the visit.

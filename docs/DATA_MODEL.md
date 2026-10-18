@@ -347,3 +347,118 @@ Technically validated visit layer
 It does not yet contain deduplicated event history, current visit state,
 business-quality issues, management intervals, analytical facts or gold marts.
 
+---
+
+## Stage 5 — Event deduplication and current visit state
+
+### Scope
+
+Stage 5 starts from the technically valid physical deliveries produced by Stage 4
+and separates two concerns:
+
+1. **global event deduplication** by `event_id`; and
+2. **visit-state precedence** by `visit_id` + `source_version`.
+
+The batch arrival order is used for processing, but it does not determine which
+visit version wins. A visit changes state only when an incoming
+`source_version` is strictly greater than the currently stored version.
+
+### `visit_events`
+
+**Grain:** one globally unique `event_id`.
+
+Important fields include:
+
+- `visit_id`
+- `source_version`
+- `operation`
+- parsed visit payload
+- first source batch and line
+- `state_action` = `applied` or `stale`
+- `prior_source_version`
+
+A stale unique event remains in history even though it does not change the
+current visit state.
+
+### `visit_event_duplicates`
+
+**Grain:** one repeated physical delivery of an already-known global `event_id`.
+
+The row records:
+
+- the duplicate batch/line;
+- the repeated `event_id`;
+- the canonical first batch/line.
+
+The duplicate is not counted as a second unique event.
+
+### `visit_current_state`
+
+**Grain:** one `visit_id`.
+
+The row keeps the highest `source_version` observed for that visit.
+
+A delete is retained as a tombstone (`is_deleted = TRUE`). This prevents an
+older upsert from resurrecting the visit. A genuinely newer upsert may reactivate
+the visit because its version is higher.
+
+### Expected Stage 5 counts
+
+```text
+1,979 technically valid physical deliveries
+1,944 globally unique event IDs
+35 duplicate deliveries
+
+1,890 applied unique state changes
+54 stale/equal-version unique events
+  49 lower-version stale events
+   5 equal-version stale events
+
+1,618 distinct current visit states
+1,567 active current visit states
+51 deleted current visit states
+```
+
+### Key source-behaviour examples
+
+`V02` demonstrates the tombstone rule:
+
+```text
+v1 upsert
+v2 delete
+later v1 upsert
+```
+
+The final state remains deleted at v2.
+
+`V04` demonstrates legitimate reactivation:
+
+```text
+v1 upsert
+v2 delete
+v3 upsert
+later v1 upsert
+```
+
+The v3 upsert becomes current because it is newer than the delete.
+
+### Audit evidence
+
+The same cumulative:
+
+```text
+reports/Report.txt
+```
+
+is extended with:
+
+- Stage 5 per-batch counts;
+- unique/duplicate/applied/stale totals;
+- all duplicate delivery references;
+- all stale/equal-version event references and reasons;
+- key V02/V03/V04 current-state examples;
+- all deleted current-state tombstones.
+
+The report is regenerated from database state rather than appended as an
+unstructured log.
+

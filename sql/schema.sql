@@ -107,3 +107,53 @@ CREATE TABLE IF NOT EXISTS visit_event_rejects (
     PRIMARY KEY (batch_id, line_number)
 );
 
+-- Stage 5: deduplicated event history and current visit state.
+--
+-- `visit_events` contains one row per globally unique event_id.
+-- `visit_event_duplicates` preserves repeated deliveries of an already-known event.
+-- `visit_current_state` keeps the highest source_version per visit, including
+-- delete tombstones so an older upsert cannot resurrect a deleted visit.
+
+CREATE TABLE IF NOT EXISTS visit_events (
+    event_id VARCHAR PRIMARY KEY,
+    visit_id VARCHAR NOT NULL,
+    source_version BIGINT NOT NULL CHECK (source_version > 0),
+    operation VARCHAR NOT NULL CHECK (operation IN ('upsert', 'delete')),
+    updated_at TIMESTAMPTZ NOT NULL,
+    property_id VARCHAR,
+    contractor_id VARCHAR,
+    visitor_id VARCHAR,
+    started_at TIMESTAMPTZ,
+    ended_at TIMESTAMPTZ,
+    first_batch_id VARCHAR NOT NULL,
+    first_line_number INTEGER NOT NULL CHECK (first_line_number > 0),
+    state_action VARCHAR NOT NULL CHECK (state_action IN ('applied', 'stale')),
+    prior_source_version BIGINT,
+    raw_payload VARCHAR NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS visit_event_duplicates (
+    batch_id VARCHAR NOT NULL,
+    line_number INTEGER NOT NULL CHECK (line_number > 0),
+    event_id VARCHAR NOT NULL,
+    canonical_batch_id VARCHAR NOT NULL,
+    canonical_line_number INTEGER NOT NULL CHECK (canonical_line_number > 0),
+    PRIMARY KEY (batch_id, line_number)
+);
+
+CREATE TABLE IF NOT EXISTS visit_current_state (
+    visit_id VARCHAR PRIMARY KEY,
+    source_version BIGINT NOT NULL CHECK (source_version > 0),
+    operation VARCHAR NOT NULL CHECK (operation IN ('upsert', 'delete')),
+    is_deleted BOOLEAN NOT NULL,
+    winning_event_id VARCHAR NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL,
+    property_id VARCHAR,
+    contractor_id VARCHAR,
+    visitor_id VARCHAR,
+    started_at TIMESTAMPTZ,
+    ended_at TIMESTAMPTZ,
+    source_batch_id VARCHAR NOT NULL,
+    source_line_number INTEGER NOT NULL CHECK (source_line_number > 0)
+);
+

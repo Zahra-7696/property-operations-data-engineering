@@ -460,6 +460,410 @@ def _stage_4_lines(
     ]
 
 
+
+def _table_exists(
+    connection: duckdb.DuckDBPyConnection,
+    table_name: str,
+) -> bool:
+    count = connection.execute(
+        """
+        SELECT COUNT(*)
+        FROM information_schema.tables
+        WHERE table_schema = 'main'
+          AND table_name = ?
+        """,
+        [table_name],
+    ).fetchone()[0]
+
+    return count == 1
+
+
+def _has_stage5_results(
+    connection: duckdb.DuckDBPyConnection,
+) -> bool:
+    if not _table_exists(connection, "visit_events"):
+        return False
+
+    completed = connection.execute(
+        """
+        SELECT COUNT(*)
+        FROM ingestion_batches
+        WHERE status = 'completed'
+        """
+    ).fetchone()[0]
+
+    return completed > 0
+
+
+def fetch_duplicate_deliveries(
+    connection: duckdb.DuckDBPyConnection,
+) -> list[dict[str, object]]:
+    rows = connection.execute(
+        """
+        SELECT
+            d.event_id,
+            d.batch_id,
+            b.source_file AS duplicate_source_file,
+            d.line_number AS duplicate_line,
+            d.canonical_batch_id,
+            cb.source_file AS canonical_source_file,
+            d.canonical_line_number AS canonical_line
+        FROM visit_event_duplicates AS d
+        JOIN ingestion_batches AS b
+            ON b.batch_id = d.batch_id
+        JOIN ingestion_batches AS cb
+            ON cb.batch_id = d.canonical_batch_id
+        ORDER BY
+            b.manifest_order,
+            d.line_number
+        """
+    ).fetchall()
+
+    return [
+        {
+            "event_id": event_id,
+            "duplicate_batch_id": duplicate_batch_id,
+            "duplicate_ref": f"{duplicate_source_file}:{duplicate_line}",
+            "canonical_batch_id": canonical_batch_id,
+            "canonical_ref": f"{canonical_source_file}:{canonical_line}",
+            "reason": "Repeated delivery of an already-known global event_id.",
+        }
+        for (
+            event_id,
+            duplicate_batch_id,
+            duplicate_source_file,
+            duplicate_line,
+            canonical_batch_id,
+            canonical_source_file,
+            canonical_line,
+        ) in rows
+    ]
+
+
+def fetch_stale_events(
+    connection: duckdb.DuckDBPyConnection,
+) -> list[dict[str, object]]:
+    rows = connection.execute(
+        """
+        SELECT
+            e.event_id,
+            e.visit_id,
+            e.source_version,
+            e.prior_source_version,
+            e.operation,
+            e.first_batch_id,
+            b.source_file,
+            e.first_line_number
+        FROM visit_events AS e
+        JOIN ingestion_batches AS b
+            ON b.batch_id = e.first_batch_id
+        WHERE e.state_action = 'stale'
+        ORDER BY
+            b.manifest_order,
+            e.first_line_number
+        """
+    ).fetchall()
+
+    result: list[dict[str, object]] = []
+
+    for (
+        event_id,
+        visit_id,
+        source_version,
+        prior_source_version,
+        operation,
+        batch_id,
+        source_file,
+        line_number,
+    ) in rows:
+        comparison = (
+            "lower source_version"
+            if source_version < prior_source_version
+            else "equal source_version"
+        )
+
+        result.append(
+            {
+                "event_id": event_id,
+                "visit_id": visit_id,
+                "incoming_version": int(source_version),
+                "existing_version": int(prior_source_version),
+                "operation": operation,
+                "batch_id": batch_id,
+                "source_ref": f"{source_file}:{line_number}",
+                "reason": (
+                    f"{comparison}: incoming version does not exceed "
+                    "the current visit version."
+                ),
+            }
+        )
+
+    return result
+
+
+def format_duplicate_delivery_table(
+    duplicates: list[dict[str, object]],
+) -> str:
+    return format_text_table(
+        headers=[
+            "#",
+            "Event ID",
+            "Duplicate source",
+            "Canonical source",
+            "Reason",
+        ],
+        rows=[
+            (
+                index,
+                item["event_id"],
+                item["duplicate_ref"],
+                item["canonical_ref"],
+                item["reason"],
+            )
+            for index, item in enumerate(duplicates, start=1)
+        ],
+        widths=[3, 12, 41, 41, 50],
+    )
+
+
+def format_stale_event_table(
+    stale_events: list[dict[str, object]],
+) -> str:
+    return format_text_table(
+        headers=[
+            "#",
+            "Visit",
+            "Event ID",
+            "Incoming",
+            "Existing",
+            "Op",
+            "Source reference",
+            "Reason",
+        ],
+        rows=[
+            (
+                index,
+                item["visit_id"],
+                item["event_id"],
+                item["incoming_version"],
+                item["existing_version"],
+                item["operation"],
+                item["source_ref"],
+                item["reason"],
+            )
+            for index, item in enumerate(stale_events, start=1)
+        ],
+        widths=[3, 8, 12, 8, 8, 7, 41, 50],
+    )
+
+
+def _stage_5_lines(
+    connection: duckdb.DuckDBPyConnection,
+) -> list[str]:
+    batches = connection.execute(
+        """
+        SELECT
+            batch_id,
+            unique_event_lines,
+            duplicate_event_lines,
+            applied_state_changes,
+            stale_event_lines,
+            status
+        FROM ingestion_batches
+        ORDER BY manifest_order
+        """
+    ).fetchall()
+
+    unique_events = connection.execute(
+        "SELECT COUNT(*) FROM visit_events"
+    ).fetchone()[0]
+
+    duplicate_deliveries = connection.execute(
+        "SELECT COUNT(*) FROM visit_event_duplicates"
+    ).fetchone()[0]
+
+    applied = connection.execute(
+        """
+        SELECT COUNT(*)
+        FROM visit_events
+        WHERE state_action = 'applied'
+        """
+    ).fetchone()[0]
+
+    stale = connection.execute(
+        """
+        SELECT COUNT(*)
+        FROM visit_events
+        WHERE state_action = 'stale'
+        """
+    ).fetchone()[0]
+
+    current_states = connection.execute(
+        "SELECT COUNT(*) FROM visit_current_state"
+    ).fetchone()[0]
+
+    active_states = connection.execute(
+        """
+        SELECT COUNT(*)
+        FROM visit_current_state
+        WHERE is_deleted = FALSE
+        """
+    ).fetchone()[0]
+
+    deleted_states = connection.execute(
+        """
+        SELECT COUNT(*)
+        FROM visit_current_state
+        WHERE is_deleted = TRUE
+        """
+    ).fetchone()[0]
+
+    duplicates = fetch_duplicate_deliveries(connection)
+    stale_events = fetch_stale_events(connection)
+
+    deleted_rows = connection.execute(
+        """
+        SELECT
+            s.visit_id,
+            s.source_version,
+            s.winning_event_id,
+            b.source_file,
+            s.source_line_number
+        FROM visit_current_state AS s
+        JOIN ingestion_batches AS b
+            ON b.batch_id = s.source_batch_id
+        WHERE s.is_deleted = TRUE
+        ORDER BY s.visit_id
+        """
+    ).fetchall()
+
+    key_visits = connection.execute(
+        """
+        SELECT
+            s.visit_id,
+            s.source_version,
+            s.operation,
+            s.is_deleted,
+            s.winning_event_id,
+            b.source_file,
+            s.source_line_number
+        FROM visit_current_state AS s
+        JOIN ingestion_batches AS b
+            ON b.batch_id = s.source_batch_id
+        WHERE s.visit_id IN ('V02', 'V03', 'V04')
+        ORDER BY s.visit_id
+        """
+    ).fetchall()
+
+    lower_stale = sum(
+        1
+        for item in stale_events
+        if item["incoming_version"] < item["existing_version"]
+    )
+    equal_stale = len(stale_events) - lower_stale
+
+    batch_table = format_text_table(
+        headers=["Batch", "Unique", "Duplicates", "Applied", "Stale", "Status"],
+        rows=batches,
+        widths=[8, 8, 10, 8, 7, 10],
+    )
+
+    key_visit_table = format_text_table(
+        headers=[
+            "Visit",
+            "Version",
+            "Operation",
+            "Deleted",
+            "Winning event",
+            "Winning source",
+        ],
+        rows=[
+            (
+                visit_id,
+                source_version,
+                operation,
+                is_deleted,
+                winning_event_id,
+                f"{source_file}:{line_number}",
+            )
+            for (
+                visit_id,
+                source_version,
+                operation,
+                is_deleted,
+                winning_event_id,
+                source_file,
+                line_number,
+            ) in key_visits
+        ],
+        widths=[8, 8, 10, 8, 14, 42],
+    )
+
+    deleted_table = format_text_table(
+        headers=["Visit", "Version", "Winning event", "Winning source"],
+        rows=[
+            (
+                visit_id,
+                source_version,
+                winning_event_id,
+                f"{source_file}:{line_number}",
+            )
+            for (
+                visit_id,
+                source_version,
+                winning_event_id,
+                source_file,
+                line_number,
+            ) in deleted_rows
+        ],
+        widths=[10, 8, 14, 44],
+    )
+
+    return [
+        "STAGE 5 - EVENT DEDUPLICATION AND CURRENT VISIT STATE",
+        _separator("-"),
+        (
+            "Purpose: count repeated global event deliveries once and maintain "
+            "the highest source_version for each visit."
+        ),
+        "",
+        "Per-batch processing summary:",
+        batch_table,
+        "",
+        "Overall totals:",
+        f"  Technically valid physical deliveries : {unique_events + duplicate_deliveries}",
+        f"  Globally unique event IDs             : {unique_events}",
+        f"  Duplicate deliveries                  : {duplicate_deliveries}",
+        f"  Applied unique state changes          : {applied}",
+        f"  Stale/equal-version unique events     : {stale}",
+        f"    - lower-version stale events        : {lower_stale}",
+        f"    - equal-version stale events        : {equal_stale}",
+        f"  Distinct current visit states         : {current_states}",
+        f"  Active current visit states           : {active_states}",
+        f"  Deleted current visit states          : {deleted_states}",
+        "",
+        "Key version/delete/reactivation examples:",
+        key_visit_table,
+        "",
+        "Duplicate-delivery evidence:",
+        format_duplicate_delivery_table(duplicates),
+        "",
+        "Stale/equal-version evidence:",
+        format_stale_event_table(stale_events),
+        "",
+        "Deleted current-state tombstones:",
+        deleted_table,
+        "",
+        (
+            "Precedence rule: an incoming event changes visit_current_state only "
+            "when source_version is strictly greater than the current version."
+        ),
+        (
+            "A delete remains as a tombstone; an older upsert cannot resurrect it. "
+            "A genuinely newer upsert can reactivate the visit."
+        ),
+    ]
+
 def build_report_text(
     connection: duckdb.DuckDBPyConnection,
 ) -> str:
@@ -486,6 +890,9 @@ def build_report_text(
         _stage_3_lines(connection),
         _stage_4_lines(connection),
     ]
+
+    if _has_stage5_results(connection):
+        sections.append(_stage_5_lines(connection))
 
     return "\n\n".join("\n".join(section) for section in sections).rstrip() + "\n"
 
