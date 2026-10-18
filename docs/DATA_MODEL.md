@@ -803,3 +803,106 @@ high-severity incidents     31
 These are sanity checks for the fact layer. Stage 9 builds the explicit reporting
 marts at company/week, property/week and contractor grains.
 
+---
+
+## Stage 9 — Reporting marts
+
+### Scope
+
+Stage 9 aggregates the Stage 8 visit and incident facts into explicit report
+grains for the six requested local weeks.
+
+Visits and incidents are aggregated separately before their metrics are joined.
+This prevents many-to-many fanout.
+
+Distinct visitors are computed directly at each displayed grain. They are
+non-additive: higher-level distinct counts must not be obtained by summing
+lower-grain distinct counts.
+
+### `rpt_company_week`
+
+**Grain:** one managing company x requested local week.
+
+```text
+3 companies x 6 requested weeks = 18 rows
+```
+
+Metrics: visits, distinct visitors, completed hours, unfinished visits, incidents
+and high-severity incidents.
+
+### `rpt_company_period`
+
+**Grain:** one managing company across the full requested period.
+
+Distinct visitors are recomputed directly at company-period grain.
+
+Expected:
+
+```text
+Clover Management: 514 visits, 228 visitors, 639.75 hours,
+                   32 unfinished, 89 incidents, 8 high
+
+Fern Management:   511 visits, 222 visitors, 684.75 hours,
+                   29 unfinished, 83 incidents, 14 high
+
+Wattle Management: 518 visits, 223 visitors, 729.00 hours,
+                   30 unfinished, 74 incidents, 9 high
+```
+
+### `rpt_property_week`
+
+**Grain:** one property x requested local week.
+
+```text
+24 properties x 6 requested weeks = 144 rows
+```
+
+A scaffold is used before metrics are joined, so properties/weeks with no
+activity remain visible.
+
+Expected:
+
+```text
+144 total property/week rows
+22 zero-activity property/week rows
+```
+
+### `rpt_contractor`
+
+**Grain:** one contractor across the requested reporting period.
+
+Metrics: visits, distinct visitors, distinct properties, completed hours and
+unfinished visits.
+
+Incidents are not attributed to contractors because the supplied data contains no
+incident-to-contractor relationship.
+
+### Distinct visitors are non-additive
+
+```text
+overall requested-period distinct visitors = 259
+sum of company distinct visitors           = 673
+```
+
+The same visitor can appear under multiple managing companies, so 673 is not an
+overall distinct-person count.
+
+### Reconciliation checks
+
+Across company/property/contractor visit partitions:
+
+```text
+visit count             1,543
+completed visit hours  2,053.50
+unfinished visits          91
+```
+
+Across company/property incident partitions:
+
+```text
+incident count            246
+high-severity incidents    31
+```
+
+Stage 10 uses these marts to build the final business-facing HTML report.
+

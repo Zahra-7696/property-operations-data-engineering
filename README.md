@@ -297,9 +297,20 @@ working correctly.
 - [x] Confirm Stage 8 tests pass (`11 passed`)
 - [x] Confirm full regression suite passes (`71 passed`)
 
+### Current stage
+
+- [ ] Build 18 company/week trend rows
+- [ ] Build company requested-period totals with direct distinct counts
+- [ ] Build all 144 property/week rows, including zero-activity weeks
+- [ ] Build the 8-row contractor breakdown
+- [ ] Aggregate visits and incidents separately before combining metrics
+- [ ] Prove distinct visitors are non-additive
+- [ ] Extend the one-command pipeline through Stage 9
+- [ ] Extend `reports/Report.txt` with reporting-mart evidence
+
 ### Next
 
-- [ ] Build company/week, property/week and contractor reporting marts
+- [ ] Generate the final business-facing HTML operations report and model extracts
 
 ---
 
@@ -1266,6 +1277,7 @@ elapsed UTC time: 2.00 hours
 
 ```powershell
 python -m src.build_analytical_facts
+python -m src.build_reporting_marts
 ```
 
 Then:
@@ -1302,6 +1314,124 @@ contractor reporting marts.
 ---
 
 
+## Stage 9 — Reporting marts
+
+### Aim
+
+Stage 9 converts the trustworthy Stage 8 facts into small reporting tables at the
+exact grains needed by the operations report. Rather than making charts repeatedly
+join and aggregate raw facts, this stage computes company/week, company-period,
+property/week and contractor metrics once with documented rules. Visits and
+incidents are aggregated separately before metrics are combined, distinct visitors
+are recalculated at each display grain, and a full property/week scaffold keeps
+weeks with no activity visible.
+
+### Questions answered
+
+- What is the weekly activity trend for each managing company?
+- What are each company's totals across the full requested period?
+- Does every property appear for every requested week, including zero activity?
+- Which contractors account for visit activity?
+- Do mart totals reconcile to the Stage 8 facts?
+- Why can distinct visitors not be added across companies or weeks?
+
+### How this stage solves them
+
+`src/build_reporting_marts.py` builds explicit scaffolds and independently
+aggregates `fact_visits` and `fact_incidents` before joining their metrics. It
+materialises `rpt_company_week`, `rpt_company_period`, `rpt_property_week` and
+`rpt_contractor`. Acceptance checks reconcile visit and incident totals before the
+transaction commits.
+
+### Why this stage exists
+
+The final report should consume stable, reviewable report grains instead of
+embedding complicated business logic inside charts. Pre-aggregation makes
+zero-activity rows explicit, prevents visit/incident fanout, keeps distinct counts
+correct and makes the final report easier to review and regenerate.
+
+### New model objects
+
+| Object | Grain | Purpose |
+| --- | --- | --- |
+| `rpt_company_week` | One company x requested week | Weekly company trend |
+| `rpt_company_period` | One company for the requested period | Period totals with direct distinct visitors |
+| `rpt_property_week` | One property x requested week | Property summary including zero activity |
+| `rpt_contractor` | One contractor for the requested period | Contractor visit breakdown |
+
+### Expected results
+
+```text
+Company/week rows                  18
+Company requested-period rows       3
+Property/week rows                144
+Contractor rows                     8
+Zero-activity property/week rows   22
+```
+
+Company-period checks:
+
+```text
+C01 Clover Management  514 visits  228 visitors  639.75 hours
+                       32 unfinished  89 incidents  8 high
+
+C02 Fern Management    511 visits  222 visitors  684.75 hours
+                       29 unfinished  83 incidents  14 high
+
+C03 Wattle Management  518 visits  223 visitors  729.00 hours
+                       30 unfinished  74 incidents  9 high
+```
+
+Top contractors by visit count:
+
+```text
+Field Crew 07   217
+Field Crew 02   208
+Field Crew 06   198
+```
+
+### Run
+
+```powershell
+python -m src.build_reporting_marts
+```
+
+Then:
+
+```powershell
+python -m pytest tests/test_reporting_marts.py -q
+python -m pytest -q
+```
+
+For a complete clean rebuild through Stage 9:
+
+```powershell
+python -m src.run_pipeline --fresh
+```
+
+### Validation / tests
+
+Stage 9 adds 12 stage-specific tests covering mart row counts, company totals,
+fact reconciliation, the 144-row property/week scaffold, 22 zero-activity rows,
+contractor totals/ranking, distinct-visitor non-additivity, idempotent rebuild and
+audit-report evidence.
+
+Expected cumulative suite after Stage 9:
+
+```text
+83 passed
+```
+
+### Boundary
+
+Stage 9 answers:
+
+> What stable aggregated datasets should the final operations report consume?
+
+Stage 10 renders these marts into the final viewable report and committed extracts.
+
+---
+
 ## How a reviewer should run the project
 
 There are two useful execution modes.
@@ -1312,7 +1442,7 @@ There are two useful execution modes.
 python -m src.run_pipeline --fresh
 ```
 
-This removes only the generated DuckDB file and rebuilds Stages 1–8 from the
+This removes only the generated DuckDB file and rebuilds Stages 1–9 from the
 committed raw data and code.
 
 **For the interview walkthrough**, run individual stages so each engineering
@@ -1327,6 +1457,7 @@ python -m src.process_visit_state
 python -m src.check_visit_quality
 python -m src.build_management_history
 python -m src.build_analytical_facts
+python -m src.build_reporting_marts
 ```
 
 The final submitted project will keep the one-command pipeline as the normal
@@ -1439,6 +1570,7 @@ operations report.
 │   ├── audit_report.py
 │   ├── build_analytical_facts.py
 │   ├── build_management_history.py
+│   ├── build_reporting_marts.py
 │   ├── check_visit_quality.py
 │   ├── database.py
 │   ├── land_visit_batches.py
@@ -1451,6 +1583,7 @@ operations report.
 │   ├── test_analytical_facts.py
 │   ├── test_batch_landing.py
 │   ├── test_management_history.py
+│   ├── test_reporting_marts.py
 │   ├── test_reference_data.py
 │   ├── test_visit_quality.py
 │   ├── test_visit_state.py

@@ -269,3 +269,56 @@ CREATE TABLE IF NOT EXISTS fact_incidents (
     is_high BOOLEAN NOT NULL
 );
 
+-- Stage 9: reporting marts for the six requested local reporting weeks.
+--
+-- Visits and incidents are aggregated independently before metrics are combined.
+-- Distinct visitors are computed at the displayed grain and are not additive.
+
+CREATE TABLE IF NOT EXISTS rpt_company_week (
+    company_id VARCHAR NOT NULL,
+    company_name VARCHAR NOT NULL,
+    week_start DATE NOT NULL,
+    visit_count BIGINT NOT NULL,
+    distinct_visitors BIGINT NOT NULL,
+    completed_visit_hours DOUBLE NOT NULL,
+    unfinished_visits BIGINT NOT NULL,
+    incident_count BIGINT NOT NULL,
+    high_severity_incidents BIGINT NOT NULL,
+    PRIMARY KEY (company_id, week_start)
+);
+
+CREATE TABLE IF NOT EXISTS rpt_company_period (
+    company_id VARCHAR PRIMARY KEY,
+    company_name VARCHAR NOT NULL,
+    visit_count BIGINT NOT NULL,
+    distinct_visitors BIGINT NOT NULL,
+    completed_visit_hours DOUBLE NOT NULL,
+    unfinished_visits BIGINT NOT NULL,
+    incident_count BIGINT NOT NULL,
+    high_severity_incidents BIGINT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS rpt_property_week (
+    property_id VARCHAR NOT NULL,
+    property_name VARCHAR NOT NULL,
+    week_start DATE NOT NULL,
+    visit_count BIGINT NOT NULL,
+    distinct_visitors BIGINT NOT NULL,
+    completed_visit_hours DOUBLE NOT NULL,
+    unfinished_visits BIGINT NOT NULL,
+    incident_count BIGINT NOT NULL,
+    high_severity_incidents BIGINT NOT NULL,
+    has_activity BOOLEAN NOT NULL,
+    PRIMARY KEY (property_id, week_start)
+);
+
+CREATE TABLE IF NOT EXISTS rpt_contractor (
+    contractor_id VARCHAR PRIMARY KEY,
+    contractor_name VARCHAR NOT NULL,
+    visit_count BIGINT NOT NULL,
+    distinct_visitors BIGINT NOT NULL,
+    property_count BIGINT NOT NULL,
+    completed_visit_hours DOUBLE NOT NULL,
+    unfinished_visits BIGINT NOT NULL
+);
+

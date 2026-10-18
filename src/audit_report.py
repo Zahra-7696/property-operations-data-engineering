@@ -1553,6 +1553,213 @@ def _stage_8_lines(
         ),
     ]
 
+
+def _has_stage9_results(
+    connection: duckdb.DuckDBPyConnection,
+) -> bool:
+    if not _table_exists(connection, "rpt_company_week"):
+        return False
+
+    return connection.execute(
+        "SELECT COUNT(*) FROM rpt_company_week"
+    ).fetchone()[0] > 0
+
+
+def _stage_9_lines(
+    connection: duckdb.DuckDBPyConnection,
+) -> list[str]:
+    company_week_count = connection.execute(
+        "SELECT COUNT(*) FROM rpt_company_week"
+    ).fetchone()[0]
+
+    company_period_count = connection.execute(
+        "SELECT COUNT(*) FROM rpt_company_period"
+    ).fetchone()[0]
+
+    property_week_count = connection.execute(
+        "SELECT COUNT(*) FROM rpt_property_week"
+    ).fetchone()[0]
+
+    contractor_count = connection.execute(
+        "SELECT COUNT(*) FROM rpt_contractor"
+    ).fetchone()[0]
+
+    zero_property_weeks = connection.execute(
+        """
+        SELECT COUNT(*)
+        FROM rpt_property_week
+        WHERE has_activity = FALSE
+        """
+    ).fetchone()[0]
+
+    company_period = connection.execute(
+        """
+        SELECT
+            company_name,
+            visit_count,
+            distinct_visitors,
+            completed_visit_hours,
+            unfinished_visits,
+            incident_count,
+            high_severity_incidents
+        FROM rpt_company_period
+        ORDER BY company_id
+        """
+    ).fetchall()
+
+    company_week = connection.execute(
+        """
+        SELECT
+            week_start,
+            company_name,
+            visit_count,
+            distinct_visitors,
+            completed_visit_hours,
+            unfinished_visits,
+            incident_count,
+            high_severity_incidents
+        FROM rpt_company_week
+        ORDER BY week_start, company_id
+        """
+    ).fetchall()
+
+    zero_rows = connection.execute(
+        """
+        SELECT
+            property_id,
+            property_name,
+            week_start,
+            visit_count,
+            incident_count
+        FROM rpt_property_week
+        WHERE has_activity = FALSE
+        ORDER BY property_id, week_start
+        """
+    ).fetchall()
+
+    contractors = connection.execute(
+        """
+        SELECT
+            contractor_name,
+            visit_count,
+            distinct_visitors,
+            property_count,
+            completed_visit_hours,
+            unfinished_visits
+        FROM rpt_contractor
+        ORDER BY visit_count DESC, contractor_id
+        """
+    ).fetchall()
+
+    overall_distinct = connection.execute(
+        """
+        SELECT COUNT(DISTINCT visitor_id)
+        FROM fact_visits
+        WHERE is_requested_week = TRUE
+        """
+    ).fetchone()[0]
+
+    summed_company_distinct = connection.execute(
+        "SELECT SUM(distinct_visitors) FROM rpt_company_period"
+    ).fetchone()[0]
+
+    return [
+        "STAGE 9 - REPORTING MARTS",
+        _separator("-"),
+        (
+            "Purpose: aggregate Stage 8 facts into explicit report grains for "
+            "company trends, property summaries and contractor activity."
+        ),
+        "",
+        "Mart counts:",
+        f"  Company/week rows               : {company_week_count}",
+        f"  Company requested-period rows   : {company_period_count}",
+        f"  Property/week rows              : {property_week_count}",
+        f"  Contractor rows                 : {contractor_count}",
+        f"  Zero-activity property/weeks    : {zero_property_weeks}",
+        "",
+        "Company requested-period summary:",
+        format_text_table(
+            headers=[
+                "Company", "Visits", "Distinct visitors", "Hours",
+                "Unfinished", "Incidents", "High",
+            ],
+            rows=[
+                (
+                    company_name, visits, visitors, f"{hours:.2f}",
+                    unfinished, incidents, high_incidents,
+                )
+                for (
+                    company_name, visits, visitors, hours,
+                    unfinished, incidents, high_incidents,
+                ) in company_period
+            ],
+            widths=[24, 8, 18, 10, 11, 10, 8],
+        ),
+        "",
+        "Company weekly trend:",
+        format_text_table(
+            headers=[
+                "Week", "Company", "Visits", "Visitors",
+                "Hours", "Unfinished", "Incidents", "High",
+            ],
+            rows=[
+                (
+                    week_start, company_name, visits, visitors,
+                    f"{hours:.2f}", unfinished, incidents, high_incidents,
+                )
+                for (
+                    week_start, company_name, visits, visitors,
+                    hours, unfinished, incidents, high_incidents,
+                ) in company_week
+            ],
+            widths=[12, 24, 8, 9, 10, 11, 10, 8],
+        ),
+        "",
+        "Zero-activity property/week evidence:",
+        format_text_table(
+            headers=["Property", "Property name", "Week", "Visits", "Incidents"],
+            rows=zero_rows,
+            widths=[10, 24, 12, 8, 10],
+        ),
+        "",
+        "Contractor breakdown:",
+        format_text_table(
+            headers=[
+                "Contractor", "Visits", "Visitors",
+                "Properties", "Hours", "Unfinished",
+            ],
+            rows=[
+                (
+                    contractor_name, visits, visitors,
+                    properties, f"{hours:.2f}", unfinished,
+                )
+                for (
+                    contractor_name, visits, visitors,
+                    properties, hours, unfinished,
+                ) in contractors
+            ],
+            widths=[24, 8, 9, 11, 10, 11],
+        ),
+        "",
+        "Distinct-visitor non-additivity:",
+        f"  Overall requested-period distinct visitors : {overall_distinct}",
+        f"  Sum of company distinct visitors           : {summed_company_distinct}",
+        (
+            "Company distinct counts cannot be added to obtain the overall "
+            "distinct count because one visitor may appear in several companies."
+        ),
+        "",
+        (
+            "Visits and incidents are aggregated independently before metrics "
+            "are combined, preserving their separate source grains."
+        ),
+        (
+            "Property/week is scaffolded from all 24 properties x 6 requested "
+            "weeks so weeks with no activity remain visible."
+        ),
+    ]
+
 def build_report_text(
     connection: duckdb.DuckDBPyConnection,
 ) -> str:
@@ -1591,6 +1798,9 @@ def build_report_text(
 
     if _has_stage8_results(connection):
         sections.append(_stage_8_lines(connection))
+
+    if _has_stage9_results(connection):
+        sections.append(_stage_9_lines(connection))
 
     return "\n\n".join("\n".join(section) for section in sections).rstrip() + "\n"
 
