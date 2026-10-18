@@ -556,3 +556,109 @@ The cumulative `reports/Report.txt` is extended with:
 The source/current-state record is preserved. Stage 6 excludes bad business
 records from reporting; it does not erase them.
 
+---
+
+## Stage 7 — Property-management history
+
+### Scope
+
+Stage 7 transforms unsorted management observations into contiguous historical
+intervals for each property.
+
+`effective_at` is business time. Consecutive observations that name the same
+company do not create new business periods and are collapsed into one interval.
+If a property later returns to a company that managed it previously, that return
+is a new interval because another company managed the property in between.
+
+Intervals use:
+
+```text
+[valid_from, valid_to)
+```
+
+so `valid_from` is included and `valid_to` is excluded.
+
+### `property_management_intervals`
+
+**Grain:** one contiguous company-management interval for one property.
+
+Primary key:
+
+```text
+(property_id, valid_from)
+```
+
+Important fields:
+
+- `property_id`
+- `company_id`
+- `valid_from`
+- `valid_to`
+- `start_observation_id`
+- `source_observation_count`
+
+The `source_observation_count` makes unchanged-observation collapsing visible
+instead of silently discarding those source statements.
+
+### `current_property_management`
+
+**Grain:** one current management row per property.
+
+This view selects the open interval (`valid_to IS NULL`) and adds property/company
+names. It exists specifically so current management is visibly different from
+historical management at an earlier visit or incident time.
+
+### Expected Stage 7 results
+
+```text
+62 source management observations
+37 historical management intervals
+25 unchanged observations collapsed
+24 properties
+24 current management rows
+```
+
+### Important examples
+
+`P01` proves that a return to a previous manager is a new interval:
+
+```text
+C01 -> C02 -> C01
+```
+
+The two `C01` periods are not merged because `C02` managed the property between
+them.
+
+`P03` changes from `C02` to `C03` at:
+
+```text
+2026-03-29T13:00:00Z
+```
+
+With `[valid_from, valid_to)` semantics:
+
+```text
+12:59 -> C02
+13:00 -> C03
+```
+
+The supplied boundary records therefore attribute:
+
+```text
+V09 / I07 at 12:59 -> C02
+V10 / I06 at 13:00 -> C03
+```
+
+### Audit evidence
+
+The cumulative `reports/Report.txt` adds:
+
+- all 37 reconstructed intervals;
+- observation/interval/current counts;
+- P01 return-to-previous-manager evidence;
+- P03 transfer-boundary evidence;
+- the 24-row current-management lookup.
+
+Stage 8 uses this historical model to attribute reportable visits by
+`started_at` and incidents by `reported_at`.
+

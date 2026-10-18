@@ -193,3 +193,35 @@ WHERE s.is_deleted = FALSE
       WHERE q.visit_id = s.visit_id
   );
 
+-- Stage 7: property-management history.
+--
+-- Consecutive observations naming the same company collapse into one interval.
+-- A later return to a previous company starts a new interval.
+-- Interval semantics are [valid_from, valid_to): start inclusive, end exclusive.
+
+CREATE TABLE IF NOT EXISTS property_management_intervals (
+    property_id VARCHAR NOT NULL,
+    company_id VARCHAR NOT NULL,
+    valid_from TIMESTAMPTZ NOT NULL,
+    valid_to TIMESTAMPTZ,
+    start_observation_id VARCHAR NOT NULL,
+    source_observation_count INTEGER NOT NULL CHECK (source_observation_count > 0),
+    PRIMARY KEY (property_id, valid_from)
+);
+
+CREATE OR REPLACE VIEW current_property_management AS
+SELECT
+    i.property_id,
+    p.property_name,
+    i.company_id,
+    c.company_name,
+    i.valid_from AS managed_from,
+    i.start_observation_id,
+    i.source_observation_count
+FROM property_management_intervals AS i
+JOIN src_properties AS p
+    ON p.property_id = i.property_id
+JOIN src_companies AS c
+    ON c.company_id = i.company_id
+WHERE i.valid_to IS NULL;
+

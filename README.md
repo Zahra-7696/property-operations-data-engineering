@@ -201,7 +201,7 @@ working correctly.
 | 4. Technical validation | Parse landed lines, retain valid source events and record technical rejects with evidence | `validated_visit_events`, `visit_event_rejects` | **Done** |
 | 5. Versioning, duplicates and deletes | Deduplicate global `event_id`, apply highest `source_version` per visit and retain delete tombstones/reactivation | `visit_events`, `visit_event_duplicates`, `visit_current_state` | **Done** |
 | 6. Business data quality | Flag unknown property/contractor references and invalid completed durations while preserving evidence | `visit_quality_issues`, `reportable_current_visits` | **Done** |
-| 7. Management history | Convert observations into historical management intervals and current management | Historical/current management models | Not started |
+| 7. Management history | Convert observations into contiguous historical intervals and expose current management separately | `property_management_intervals`, `current_property_management` | **Done** |
 | 8. Analytical facts | Attribute visits/incidents historically, apply local week rules and UTC elapsed hours | Visit and incident facts | Not started |
 | 9. Gold reporting models | Create company-week, property-week and contractor-ready reporting models | BI/reporting tables | Not started |
 | 10. Operations report | Build a polished report with KPIs, trends, summaries, findings and quality/load evidence | `reports/operations_report.html` | Not started |
@@ -273,9 +273,20 @@ working correctly.
 - [x] Confirm Stage 6 tests pass (`10 passed`)
 - [x] Confirm full regression suite passes (`50 passed`)
 
+### Completed in Stage 7
+
+- [x] Collapse consecutive unchanged management observations
+- [x] Build start-inclusive/end-exclusive management intervals
+- [x] Preserve a return to a previous company as a new interval
+- [x] Build one-row-per-property current-management lookup
+- [x] Prove the exact P03 transfer boundary
+- [x] Show all reconstructed management intervals on screen and in `reports/Report.txt`
+- [x] Confirm Stage 7 tests pass (`10 passed`)
+- [x] Confirm full regression suite passes (`60 passed`)
+
 ### Next
 
-- [ ] Build property-management history and current-management lookup
+- [ ] Build historical visit and incident analytical facts
 
 ---
 
@@ -333,6 +344,11 @@ SUCCESS: All supplied source files match DATASET_MANIFEST.json.
 ```
 
 ---
+### Validation / tests
+
+Stage 1 has no separate pytest test file. Its validation command successfully
+verified all 12 supplied files against the expected row counts and SHA256 hashes.
+
 
 ---
 
@@ -457,6 +473,16 @@ The loader runs inside one transaction. If loading or validation fails before
 commit, DuckDB rolls back instead of leaving a partially rebuilt reference layer.
 
 ---
+### Validation / tests
+
+```text
+Stage-specific tests: 11 passed
+Cumulative tests after Stage 2: 11 passed
+```
+
+The tests cover reference row counts, logical relationships, severity values and
+report-week rules.
+
 
 ---
 
@@ -582,6 +608,16 @@ Stage 4 answers:
 
 Duplicate `event_id`, `source_version`, deletes and current visit state are handled
 after technical validation, not silently mixed into raw landing.
+### Validation / tests
+
+```text
+Stage-specific tests: 6 passed
+Cumulative tests after Stage 3: 17 passed
+```
+
+The tests cover manifest order, exact raw-line counts, line numbering, replay
+no-op behaviour and rollback/restart after a simulated batch failure.
+
 
 ---
 
@@ -696,6 +732,16 @@ python -m src.validate_visit_events
 ```
 
 The second validation run should show all batches as `skipped`.
+
+### Validation / tests
+
+```text
+Stage-specific tests: 12 passed
+Cumulative tests after Stage 4: 29 passed
+```
+
+The tests cover technical-valid/invalid counts, rejection categories, reject
+evidence, timestamp validation and validation replay.
 
 ### Boundary
 
@@ -818,6 +864,16 @@ python -m src.process_visit_state
 
 The second run should show every batch as `skipped`.
 
+### Validation / tests
+
+```text
+Stage-specific tests: 11 passed
+Cumulative tests after Stage 5: 40 passed
+```
+
+The tests cover event deduplication, source-version precedence, V02 tombstone
+protection, V04 reactivation, V03 correction, replay and rollback/restart.
+
 ### Boundary
 
 Stage 5 answers:
@@ -924,6 +980,16 @@ reports/Report.txt
 
 with issue counts, exact source references and exclusion reasons.
 
+### Validation / tests
+
+```text
+Stage-specific tests: 10 passed
+Cumulative tests after Stage 6: 50 passed
+```
+
+The tests cover V11/V12/V13 business-quality rules, reportable visit counts,
+unfinished visits, deleted tombstones, cumulative report evidence and idempotency.
+
 ### Boundary
 
 Stage 6 answers:
@@ -933,6 +999,147 @@ Stage 6 answers:
 Stage 7 answers:
 
 > Which company managed each property at each point in time?
+
+---
+
+## Stage 7 — Property-management history
+
+### Aim
+
+Stage 7 turns the 62 unsorted property-management observations into a reliable
+business-time history. A source observation says which company manages a
+property from `effective_at`, but repeated observations can describe the same
+unchanged manager. This stage collapses only consecutive unchanged states,
+preserves a later return to a previous company as a separate interval, and
+creates `[valid_from, valid_to)` periods so a visit or incident can later be
+assigned to the company that actually managed the property when it occurred.
+It also creates a separate current-management lookup, because today's manager
+can differ from the company responsible for an older activity record.
+
+### Questions answered
+
+- What company managed each property at any given business timestamp?
+- Which management observations represent real changes versus unchanged repeats?
+- Does returning to an earlier company create a new historical period?
+- Which company currently manages each property?
+- Which company owns the exact transfer timestamp?
+
+### How this stage solves them
+
+`src/build_management_history.py` sorts observations by property and
+`effective_at`, detects company changes with window functions, collapses each
+consecutive unchanged run, and uses the next change time as `valid_to`.
+`property_management_intervals` stores the history and
+`current_property_management` exposes the single open interval for each property.
+The cumulative audit report shows the full interval history and exact boundary
+examples.
+
+### Why this stage exists
+
+A direct join from visits/incidents to `property_management` on `property_id`
+would create multiple matches because each property can have several management
+observations. Historical reporting therefore needs effective-dated intervals,
+not merely the latest company or a property-only join.
+
+### New model objects
+
+| Object | Grain | Purpose |
+| --- | --- | --- |
+| `property_management_intervals` | One contiguous manager interval per property | Historical company attribution using business time |
+| `current_property_management` | One current row per property | Explicit current manager lookup with names |
+
+### Expected results
+
+```text
+62 source observations
+37 historical intervals
+25 unchanged observations collapsed
+24 properties
+24 current-management rows
+```
+
+### What the Stage 7 totals mean
+
+| Result | Meaning |
+| --- | --- |
+| `62 source management observations` | The original rows in `src_property_management`; each is a source statement that a company manages a property from an `effective_at` time. |
+| `37 historical management intervals` | The real contiguous management periods after consecutive unchanged observations are collapsed. |
+| `25 unchanged observations collapsed` | `62 - 37 = 25` repeated observations confirmed an already-current manager and therefore did not start a new business interval. |
+| `24 properties represented` | All 24 properties have management history. |
+| `24 current management rows` | Each property has exactly one open interval with `valid_to IS NULL`, representing its current manager. |
+
+These counts do not mean 25 observations were deleted. Their evidence is retained
+through `source_observation_count` on the reconstructed interval.
+
+Important examples:
+
+```text
+P01: C01 -> C02 -> C01
+```
+
+The final `C01` is a new interval, not a continuation of the first one.
+
+For `P03`, management changes at exactly:
+
+```text
+2026-03-29T13:00:00Z
+```
+
+The interval rule is:
+
+```text
+valid_from <= business_time < valid_to
+```
+
+so:
+
+```text
+12:59 -> C02
+13:00 -> C03
+```
+
+### Run
+
+```powershell
+python -m src.build_management_history
+```
+
+Then:
+
+```powershell
+python -m pytest tests/test_management_history.py -q
+python -m pytest -q
+```
+
+The same cumulative:
+
+```text
+reports/Report.txt
+```
+
+is extended with all intervals, the P01 history, P03 boundary proof and current
+management lookup.
+
+### Validation / tests
+
+```text
+Stage-specific tests: 10 passed
+Cumulative tests after Stage 7: 60 passed
+```
+
+The tests cover the 62-to-37 interval reconstruction, one current manager per
+property, P01 `C01 -> C02 -> C01`, P03 exact transfer boundary, incident
+attribution, positive interval duration, idempotent rebuild and audit-report
+evidence.
+
+### Boundary
+
+Stage 7 answers:
+
+> Who managed this property at a particular business time?
+
+Stage 8 uses that answer to build visit and incident facts and assign the correct
+historical company to every reportable activity record.
 
 ---
 
@@ -990,6 +1197,7 @@ python -m src.land_visit_batches
 python -m src.validate_visit_events
 python -m src.process_visit_state
 python -m src.check_visit_quality
+python -m src.build_management_history
 python -m pytest -q
 ```
 
@@ -1002,11 +1210,12 @@ At the current stage this:
 5. technically validates the landed events and preserves rejects;
 6. deduplicates deliveries and builds versioned current visit state;
 7. checks business-quality rules and creates `reportable_current_visits`;
-8. rebuilds the cumulative engineering/audit report;
-9. runs the automated regression suite.
+8. reconstructs historical and current property management;
+9. rebuilds the cumulative engineering/audit report;
+10. runs the automated regression suite.
 
-Later stages add management history, analytical facts, gold reporting models and
-the final business-facing HTML operations report.
+Later stages add analytical facts, gold reporting models and the final
+business-facing HTML operations report.
 
 ---
 
@@ -1033,6 +1242,7 @@ the final business-facing HTML operations report.
 ├── src/
 │   ├── __init__.py
 │   ├── audit_report.py
+│   ├── build_management_history.py
 │   ├── check_visit_quality.py
 │   ├── database.py
 │   ├── land_visit_batches.py
@@ -1042,6 +1252,7 @@ the final business-facing HTML operations report.
 │   └── verify_sources.py
 ├── tests/
 │   ├── test_batch_landing.py
+│   ├── test_management_history.py
 │   ├── test_reference_data.py
 │   ├── test_visit_quality.py
 │   ├── test_visit_state.py

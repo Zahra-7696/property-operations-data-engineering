@@ -1058,6 +1058,256 @@ def _stage_6_lines(
         ),
     ]
 
+
+def _has_stage7_results(
+    connection: duckdb.DuckDBPyConnection,
+) -> bool:
+    if not _table_exists(connection, "property_management_intervals"):
+        return False
+
+    count = connection.execute(
+        "SELECT COUNT(*) FROM property_management_intervals"
+    ).fetchone()[0]
+
+    return count > 0
+
+
+def _stage_7_lines(
+    connection: duckdb.DuckDBPyConnection,
+) -> list[str]:
+    source_observations = connection.execute(
+        "SELECT COUNT(*) FROM src_property_management"
+    ).fetchone()[0]
+
+    intervals = connection.execute(
+        "SELECT COUNT(*) FROM property_management_intervals"
+    ).fetchone()[0]
+
+    properties = connection.execute(
+        """
+        SELECT COUNT(DISTINCT property_id)
+        FROM property_management_intervals
+        """
+    ).fetchone()[0]
+
+    current_rows = connection.execute(
+        "SELECT COUNT(*) FROM current_property_management"
+    ).fetchone()[0]
+
+    histories = connection.execute(
+        """
+        SELECT
+            i.property_id,
+            p.property_name,
+            i.company_id,
+            c.company_name,
+            i.valid_from,
+            i.valid_to,
+            i.start_observation_id,
+            i.source_observation_count
+        FROM property_management_intervals AS i
+        JOIN src_properties AS p
+            ON p.property_id = i.property_id
+        JOIN src_companies AS c
+            ON c.company_id = i.company_id
+        ORDER BY i.property_id, i.valid_from
+        """
+    ).fetchall()
+
+    current = connection.execute(
+        """
+        SELECT
+            property_id,
+            property_name,
+            company_id,
+            company_name,
+            managed_from
+        FROM current_property_management
+        ORDER BY property_id
+        """
+    ).fetchall()
+
+    p01 = connection.execute(
+        """
+        SELECT
+            company_id,
+            valid_from,
+            valid_to,
+            source_observation_count
+        FROM property_management_intervals
+        WHERE property_id = 'P01'
+        ORDER BY valid_from
+        """
+    ).fetchall()
+
+    boundary_records = connection.execute(
+        """
+        WITH supplied_events AS (
+            SELECT
+                'visit' AS record_type,
+                visit_id AS record_id,
+                property_id,
+                started_at AS business_time
+            FROM visit_current_state
+            WHERE visit_id IN ('V09', 'V10')
+
+            UNION ALL
+
+            SELECT
+                'incident' AS record_type,
+                incident_id AS record_id,
+                property_id,
+                reported_at AS business_time
+            FROM src_incidents
+            WHERE incident_id IN ('I06', 'I07')
+        )
+        SELECT
+            e.record_type,
+            e.record_id,
+            e.property_id,
+            e.business_time,
+            i.company_id
+        FROM supplied_events AS e
+        LEFT JOIN property_management_intervals AS i
+            ON i.property_id = e.property_id
+           AND e.business_time >= i.valid_from
+           AND (i.valid_to IS NULL OR e.business_time < i.valid_to)
+        ORDER BY e.business_time, e.record_type, e.record_id
+        """
+    ).fetchall()
+
+    return [
+        "STAGE 7 - PROPERTY MANAGEMENT HISTORY",
+        _separator("-"),
+        (
+            "Purpose: convert unsorted management observations into contiguous "
+            "business-time intervals and expose the current manager separately."
+        ),
+        "",
+        "Overall totals:",
+        f"  Source management observations    : {source_observations}",
+        f"  Historical management intervals   : {intervals}",
+        f"  Unchanged observations collapsed  : {source_observations - intervals}",
+        f"  Properties represented            : {properties}",
+        f"  Current management rows           : {current_rows}",
+        "",
+        "All reconstructed management intervals:",
+        format_text_table(
+            headers=[
+                "Property",
+                "Property name",
+                "Company",
+                "Company name",
+                "Valid from UTC",
+                "Valid to UTC",
+                "Start obs",
+                "Obs count",
+            ],
+            rows=[
+                (
+                    property_id,
+                    property_name,
+                    company_id,
+                    company_name,
+                    _format_utc(valid_from),
+                    _format_utc(valid_to),
+                    start_observation_id,
+                    observation_count,
+                )
+                for (
+                    property_id,
+                    property_name,
+                    company_id,
+                    company_name,
+                    valid_from,
+                    valid_to,
+                    start_observation_id,
+                    observation_count,
+                ) in histories
+            ],
+            widths=[9, 23, 8, 25, 20, 20, 11, 9],
+        ),
+        "",
+        "P01 return-to-previous-manager proof:",
+        format_text_table(
+            headers=["Company", "Valid from UTC", "Valid to UTC", "Obs count"],
+            rows=[
+                (
+                    company_id,
+                    _format_utc(valid_from),
+                    _format_utc(valid_to),
+                    observation_count,
+                )
+                for (
+                    company_id,
+                    valid_from,
+                    valid_to,
+                    observation_count,
+                ) in p01
+            ],
+            widths=[10, 22, 22, 10],
+        ),
+        "",
+        "P03 transfer-boundary attribution proof:",
+        format_text_table(
+            headers=["Type", "Record", "Property", "Business time UTC", "Company"],
+            rows=[
+                (
+                    record_type,
+                    record_id,
+                    property_id,
+                    _format_utc(business_time),
+                    company_id,
+                )
+                for (
+                    record_type,
+                    record_id,
+                    property_id,
+                    business_time,
+                    company_id,
+                ) in boundary_records
+            ],
+            widths=[10, 10, 10, 22, 10],
+        ),
+        "",
+        "Current-management lookup:",
+        format_text_table(
+            headers=[
+                "Property",
+                "Property name",
+                "Company",
+                "Company name",
+                "Managed from UTC",
+            ],
+            rows=[
+                (
+                    property_id,
+                    property_name,
+                    company_id,
+                    company_name,
+                    _format_utc(managed_from),
+                )
+                for (
+                    property_id,
+                    property_name,
+                    company_id,
+                    company_name,
+                    managed_from,
+                ) in current
+            ],
+            widths=[9, 23, 8, 25, 22],
+        ),
+        "",
+        (
+            "Interval rule: [valid_from, valid_to). A record exactly at the "
+            "transfer timestamp belongs to the new company."
+        ),
+        (
+            "Consecutive unchanged observations collapse into one interval; "
+            "a later return to a previous company creates a new interval."
+        ),
+    ]
+
 def build_report_text(
     connection: duckdb.DuckDBPyConnection,
 ) -> str:
@@ -1090,6 +1340,9 @@ def build_report_text(
 
     if _has_stage6_results(connection):
         sections.append(_stage_6_lines(connection))
+
+    if _has_stage7_results(connection):
+        sections.append(_stage_7_lines(connection))
 
     return "\n\n".join("\n".join(section) for section in sections).rstrip() + "\n"
 
