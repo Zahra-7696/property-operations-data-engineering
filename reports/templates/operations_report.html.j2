@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ title }}</title>
+<style>
+:root {
+  --ink: #18212f;
+  --muted: #657184;
+  --line: #dce2ea;
+  --panel: #ffffff;
+  --soft: #f5f7fa;
+  --accent: #1f5d50;
+  --accent-soft: #e9f3f0;
+  --warning: #8a5a00;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: var(--ink);
+  background: #eef2f5;
+  line-height: 1.45;
+}
+.container { max-width: 1380px; margin: 0 auto; padding: 28px; }
+.hero {
+  background: linear-gradient(135deg, #153d36, #236b5d);
+  color: white;
+  padding: 30px;
+  border-radius: 18px;
+  box-shadow: 0 10px 28px rgba(20, 40, 55, .14);
+}
+.hero h1 { margin: 0 0 8px; font-size: 34px; }
+.hero p { margin: 5px 0; opacity: .92; }
+.meta { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 16px; font-size: 14px; }
+.section {
+  background: var(--panel);
+  margin-top: 22px;
+  padding: 24px;
+  border-radius: 16px;
+  box-shadow: 0 5px 18px rgba(35, 55, 75, .07);
+}
+.section h2 { margin-top: 0; font-size: 24px; }
+.section h3 { margin-top: 22px; }
+.kpis {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(150px, 1fr));
+  gap: 12px;
+}
+.kpi {
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  padding: 16px;
+}
+.kpi .label { color: var(--muted); font-size: 13px; }
+.kpi .value { font-size: 28px; font-weight: 750; margin-top: 4px; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+@media (max-width: 1000px) {
+  .kpis { grid-template-columns: repeat(2, 1fr); }
+  .grid2 { grid-template-columns: 1fr; }
+}
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th {
+  text-align: left;
+  background: #edf2f5;
+  color: #354355;
+  padding: 10px 9px;
+  border-bottom: 2px solid #d3dbe4;
+  position: sticky;
+  top: 0;
+}
+td { padding: 9px; border-bottom: 1px solid #e5e9ef; }
+tr.zero { background: #fafafa; color: #667282; }
+.badge {
+  display: inline-block;
+  background: var(--accent-soft);
+  color: var(--accent);
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+}
+.note {
+  background: #f7faf9;
+  border-left: 4px solid var(--accent);
+  padding: 12px 14px;
+  border-radius: 8px;
+}
+.warning {
+  background: #fff8e8;
+  border-left: 4px solid #c48712;
+  padding: 12px 14px;
+  border-radius: 8px;
+}
+ul.compact li { margin: 5px 0; }
+.small { color: var(--muted); font-size: 13px; }
+footer { color: var(--muted); font-size: 12px; padding: 24px 4px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <header class="hero">
+    <h1>{{ title }}</h1>
+    <p>Weekly contractor visits and incidents by property and historical managing company.</p>
+    <div class="meta">
+      <span><strong>Requested weeks:</strong> {{ first_week }} to {{ last_week }}</span>
+      <span><strong>Latest processed batch:</strong> {{ latest_batch_id }}</span>
+      <span><strong>Generated:</strong> {{ generated_at }}</span>
+    </div>
+  </header>
+
+  <section class="section">
+    <h2>Executive summary</h2>
+    <div class="kpis">
+      {% for item in kpis %}
+      <div class="kpi">
+        <div class="label">{{ item.label }}</div>
+        <div class="value">{{ item.value }}</div>
+      </div>
+      {% endfor %}
+    </div>
+    <p class="small">
+      Metrics cover only the six requested property-local reporting weeks.
+      Valid records outside those weeks remain in the analytical facts but are excluded here.
+    </p>
+  </section>
+
+  <section class="section">
+    <h2>Weekly activity by managing company</h2>
+    <p>
+      Company attribution uses the manager in force at each visit's <code>started_at</code>
+      or incident's <code>reported_at</code>. Week labels are Monday dates in the property's
+      IANA timezone.
+    </p>
+    <div class="grid2">
+      <div>{{ weekly_visits_chart | safe }}</div>
+      <div>{{ weekly_incidents_chart | safe }}</div>
+    </div>
+    <h3>Requested-period company totals</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>Company</th><th>Visits</th><th>Distinct visitors</th><th>Completed hours</th>
+          <th>Unfinished</th><th>Incidents</th><th>High severity</th>
+        </tr></thead>
+        <tbody>
+          {% for r in company_period %}
+          <tr>
+            <td>{{ r.company_name }}</td><td>{{ r.visit_count }}</td><td>{{ r.distinct_visitors }}</td>
+            <td>{{ "%.2f"|format(r.completed_visit_hours) }}</td><td>{{ r.unfinished_visits }}</td>
+            <td>{{ r.incident_count }}</td><td>{{ r.high_severity_incidents }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="section">
+    <h2>Property summary</h2>
+    <p>
+      The table contains all 24 properties across all six requested weeks, including
+      zero-activity combinations. Zero rows are retained rather than disappearing from the report.
+    </p>
+    <p><span class="badge">{{ zero_activity_property_weeks }} zero-activity property/week rows</span></p>
+    <div class="table-wrap" style="max-height:620px; overflow-y:auto;">
+      <table>
+        <thead><tr>
+          <th>Property</th><th>Week</th><th>Visits</th><th>Distinct visitors</th>
+          <th>Hours</th><th>Unfinished</th><th>Incidents</th><th>High</th>
+        </tr></thead>
+        <tbody>
+          {% for r in property_week %}
+          <tr class="{% if not r.has_activity %}zero{% endif %}">
+            <td>{{ r.property_name }} ({{ r.property_id }})</td><td>{{ r.week_start }}</td>
+            <td>{{ r.visit_count }}</td><td>{{ r.distinct_visitors }}</td>
+            <td>{{ "%.2f"|format(r.completed_visit_hours) }}</td><td>{{ r.unfinished_visits }}</td>
+            <td>{{ r.incident_count }}</td><td>{{ r.high_severity_incidents }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="section">
+    <h2>Contractor visit activity</h2>
+    <p>
+      Contractor metrics are visit-only. The supplied incidents do not contain a contractor
+      relationship, so this report does not infer one.
+    </p>
+    <div class="grid2">
+      <div>{{ contractor_chart | safe }}</div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>Contractor</th><th>Visits</th><th>Visitors</th><th>Properties</th>
+            <th>Hours</th><th>Unfinished</th>
+          </tr></thead>
+          <tbody>
+            {% for r in contractors %}
+            <tr>
+              <td>{{ r.contractor_name }}</td><td>{{ r.visit_count }}</td>
+              <td>{{ r.distinct_visitors }}</td><td>{{ r.property_count }}</td>
+              <td>{{ "%.2f"|format(r.completed_visit_hours) }}</td><td>{{ r.unfinished_visits }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <h2>Data quality and load confidence</h2>
+    <p>
+      These figures show what happened to source data before it reached the report,
+      so the reader can judge what was excluded and why.
+    </p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Measure</th><th>Value</th><th>Interpretation</th></tr></thead>
+        <tbody>
+          {% for r in quality_rows %}
+          <tr><td>{{ r.measure }}</td><td>{{ r.value }}</td><td>{{ r.interpretation }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="note">
+      Technical rejects and business-quality exceptions are retained in the DuckDB model and
+      cumulative <code>reports/Report.txt</code>; they are not silently discarded.
+    </div>
+  </section>
+
+  <section class="section">
+    <h2>Definitions</h2>
+    <ul class="compact">
+      {% for item in definitions %}<li>{{ item }}</li>{% endfor %}
+    </ul>
+  </section>
+
+  <section class="section">
+    <h2>Findings and operational follow-up</h2>
+    <ul class="compact">
+      {% for item in findings %}<li>{{ item }}</li>{% endfor %}
+    </ul>
+
+    <h3>What the data cannot establish</h3>
+    <div class="warning">
+      <ul class="compact">
+        {% for item in limitations %}<li>{{ item }}</li>{% endfor %}
+      </ul>
+    </div>
+  </section>
+
+  <footer>
+    Generated from the committed fictional assignment data using Python, DuckDB, SQL,
+    Plotly and Jinja2. See README.md for a clean rebuild command and model definitions.
+  </footer>
+</div>
+</body>
+</html>

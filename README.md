@@ -128,8 +128,6 @@ audit trail or a discussion of scaling. Completing the core project well is suff
 
 ---
 
----
-
 ## Candidate implementation
 
 ### Project approach
@@ -203,8 +201,8 @@ working correctly.
 | 6. Business data quality | Flag unknown property/contractor references and invalid completed durations while preserving evidence | `visit_quality_issues`, `reportable_current_visits` | **Done** |
 | 7. Management history | Convert observations into contiguous historical intervals and expose current management separately | `property_management_intervals`, `current_property_management` | **Done** |
 | 8. Analytical facts | Attribute visits/incidents historically, derive property-local weeks and UTC elapsed hours | `fact_visits`, `fact_incidents` | **Done** |
-| 9. Gold reporting models | Create company-week, property-week and contractor-ready reporting models | BI/reporting tables | Not started |
-| 10. Operations report | Build a polished report with KPIs, trends, summaries, findings and quality/load evidence | `reports/operations_report.html` | Not started |
+| 9. Reporting marts | Build company/week, company-period, property/week and contractor reporting marts | `rpt_company_week`, `rpt_company_period`, `rpt_property_week`, `rpt_contractor` | **Done** |
+| 10. Operations report | Build a polished report with KPIs, trends, summaries, findings and quality/load evidence | `reports/operations_report.html`, `reports/extracts/` | **Done** |
 | 11. Full validation suite | Cover edge cases including replay, rollback, stale versions, transfer boundaries and DST | Automated test suite | Not started |
 | 12. CI and reproducibility | Run checks automatically from a clean Git checkout | GitHub Actions workflow | Not started |
 | 13. Production design | Explain how the solution could scale using AWS/S3/event-driven services/Snowflake | Architecture document | Not started |
@@ -297,22 +295,36 @@ working correctly.
 - [x] Confirm Stage 8 tests pass (`11 passed`)
 - [x] Confirm full regression suite passes (`71 passed`)
 
-### Current stage
+### Completed in Stage 9
 
-- [ ] Build 18 company/week trend rows
-- [ ] Build company requested-period totals with direct distinct counts
-- [ ] Build all 144 property/week rows, including zero-activity weeks
-- [ ] Build the 8-row contractor breakdown
-- [ ] Aggregate visits and incidents separately before combining metrics
-- [ ] Prove distinct visitors are non-additive
-- [ ] Extend the one-command pipeline through Stage 9
-- [ ] Extend `reports/Report.txt` with reporting-mart evidence
+- [x] Build 18 company/week trend rows
+- [x] Build company requested-period totals with direct distinct counts
+- [x] Build all 144 property/week rows, including 22 zero-activity weeks
+- [x] Build the 8-row contractor breakdown
+- [x] Aggregate visits and incidents separately before combining metrics
+- [x] Prove distinct visitors are non-additive
+- [x] Confirm Stage 9 tests pass (`12 passed`)
+- [x] Confirm full regression suite passes (`83 passed`)
+- [x] Confirm a clean `--fresh` rebuild completes through Stage 9
+
+### Completed in Stage 10
+
+- [x] Generate the self-contained HTML operations report
+- [x] Export five useful modelled CSV extracts
+- [x] Include requested period, definitions and latest successful batch
+- [x] Include company trend, complete property summary and contractor breakdown
+- [x] Include data-quality/load evidence
+- [x] Include findings, operational follow-up and explicit limitations
+- [x] Record successful report-build metadata
+- [x] Add the interview-friendly pipeline walkthrough
+- [x] Confirm Stage 10 tests pass (`8 passed`)
+- [x] Confirm full regression suite passes (`91 passed`)
 
 ### Next
 
-- [ ] Generate the final business-facing HTML operations report and model extracts
-
----
+- [ ] Add CI/reproducibility automation
+- [ ] Document production-scale architecture
+- [ ] Prepare the final interview walkthrough
 
 ---
 
@@ -1432,21 +1444,129 @@ Stage 10 renders these marts into the final viewable report and committed extrac
 
 ---
 
+## Stage 10 — Operations report and model extracts
+
+### Aim
+
+Stage 10 turns the validated reporting marts into the final artifact an operations
+manager or interviewer can open directly. The HTML report does not contain new
+business logic; it presents the already-tested Stage 9 metrics as KPIs, company
+trends, a complete property/week summary, contractor activity and data-quality/load
+evidence. It also records definitions, findings and limitations so the reader can
+understand both what the metrics show and what the supplied data cannot establish.
+Useful CSV extracts are generated alongside the report so reviewers can inspect the
+modelled outputs without opening DuckDB.
+
+### Questions answered
+
+- Can a reviewer see the required weekly operations metrics without querying the database?
+- Does the report include company trends, zero-activity property weeks and contractor activity?
+- Can the reader judge source/load quality and understand exclusions?
+- Are reporting definitions, period and latest successful batch explicit?
+- Are findings careful not to claim relationships or risk measures the data cannot support?
+- Can the final artifacts be regenerated from a fresh checkout?
+
+### How this stage solves them
+
+`src/generate_report.py` reads only the stable reporting marts and load/quality
+metadata, renders a self-contained Jinja2/Plotly HTML report and writes five CSV
+model extracts. `report_builds` records the successful report build. The cumulative
+`reports/Report.txt` gains a Stage 10 section. The pipeline runner is also made
+interview-friendly: before each stage it explains the aim and questions, after the
+stage it presents results and test coverage, then waits for Enter.
+
+### Why this stage exists
+
+The assignment requires a useful, viewable report and modelled extracts, not only
+correct database tables. Separating presentation from modelling keeps report code
+simple and ensures the charts cannot quietly redefine business rules already tested
+in SQL.
+
+### Generated artifacts
+
+```text
+reports/operations_report.html
+reports/extracts/company_week.csv
+reports/extracts/company_period.csv
+reports/extracts/property_week.csv
+reports/extracts/contractor.csv
+reports/extracts/data_quality_summary.csv
+```
+
+These artifacts should be committed to the final repository.
+
+### Run Stage 10
+
+```powershell
+python -m src.generate_report
+```
+
+Open:
+
+```text
+reports/operations_report.html
+```
+
+Then test:
+
+```powershell
+python -m pytest tests/test_report.py -q
+python -m pytest -q
+```
+
+### Validation / tests
+
+Stage 10 adds 8 report-generation tests covering the viewable HTML artifact,
+required KPIs, reporting period/latest batch, quality/load evidence, CSV extract
+row counts, findings/limitations, report-build metadata and regeneration.
+
+Confirmed locally:
+
+```text
+Stage 10 report tests: 8 passed
+Full regression suite: 91 passed
+```
+
+---
+
 ## How a reviewer should run the project
 
-There are two useful execution modes.
+Run all commands from the **repository root** after creating/activating a Python
+environment and installing the dependencies from `requirements.txt`.
 
-**For a clean reproducibility check**, run the pipeline with one command:
+### Recommended interview walkthrough
 
 ```powershell
 python -m src.run_pipeline --fresh
 ```
 
-This removes only the generated DuckDB file and rebuilds Stages 1–9 from the
-committed raw data and code.
+This removes only the generated DuckDB state and rebuilds the complete core
+project from the committed source files through the final Stage 10 report.
 
-**For the interview walkthrough**, run individual stages so each engineering
-decision is visible:
+The runner is intentionally interactive. For each stage it:
+
+1. explains the aim in plain language;
+2. lists the questions that stage answers;
+3. runs the transformation;
+4. explains and displays the important result tables;
+5. states the relevant verified test coverage;
+6. prints a separator;
+7. waits for Enter before continuing.
+
+This is the recommended command for the interview because it shows both the data
+flow and the reasoning behind each layer.
+
+### Unattended / reproducibility run
+
+For CI or a clean rebuild without pauses:
+
+```powershell
+python -m src.run_pipeline --fresh --no-pause
+```
+
+### Run an individual stage
+
+Individual stage commands remain useful for focused explanation or debugging:
 
 ```powershell
 python -m src.verify_sources
@@ -1458,11 +1578,34 @@ python -m src.check_visit_quality
 python -m src.build_management_history
 python -m src.build_analytical_facts
 python -m src.build_reporting_marts
+python -m src.generate_report
 ```
 
-The final submitted project will keep the one-command pipeline as the normal
-reviewer path, while the stage commands remain useful for explanation and
-debugging.
+The final viewable business artifact is:
+
+```text
+reports/operations_report.html
+```
+
+The cumulative engineering/audit evidence is:
+
+```text
+reports/Report.txt
+```
+
+### Final automated verification
+
+After the rebuild, run the complete regression suite:
+
+```powershell
+python -m pytest -q
+```
+
+The verified Stage 10 repository state passes:
+
+```text
+91 passed
+```
 
 ---
 
@@ -1505,46 +1648,6 @@ A DuckDB-capable GUI database client can also open the same file directly.
 
 ---
 
-## How to run the project currently
-
-From the repository root:
-
-```powershell
-cd D:\project\onside\Assignment
-
-.\.venv\Scripts\Activate.ps1
-
-python -m src.verify_sources
-python -m src.load_reference_data
-python -m src.land_visit_batches
-python -m src.validate_visit_events
-python -m src.process_visit_state
-python -m src.check_visit_quality
-python -m src.build_management_history
-python -m src.build_analytical_facts
-python -m pytest -q
-```
-
-At the current stage this:
-
-1. verifies the immutable raw files;
-2. rebuilds and validates the typed reference layer;
-3. lands all six visit-change batches in manifest order;
-4. preserves all 1,997 physical JSONL lines;
-5. technically validates the landed events and preserves rejects;
-6. deduplicates deliveries and builds versioned current visit state;
-7. checks business-quality rules and creates `reportable_current_visits`;
-8. reconstructs historical and current property management;
-9. builds separate visit and incident analytical facts with historical company,
-   local-week and elapsed-hours logic;
-10. rebuilds the cumulative engineering/audit report;
-11. runs the automated regression suite.
-
-Later stages add gold reporting models and the final business-facing HTML
-operations report.
-
----
-
 ## Repository structure
 
 ```text
@@ -1557,12 +1660,27 @@ operations report.
 │   ├── property_management.csv
 │   ├── report_weeks.csv
 │   ├── visit_changes/
-│   └── modelled/                 # generated DuckDB; ignored by Git
+│   │   ├── batch_01.jsonl
+│   │   ├── batch_02.jsonl
+│   │   ├── batch_03.jsonl
+│   │   ├── batch_04.jsonl
+│   │   ├── batch_05.jsonl
+│   │   └── batch_06.jsonl
+│   └── modelled/                     # generated DuckDB; ignored by Git
 ├── docs/
 │   ├── ORIGINAL_ASSIGNMENT_BRIEF.md
-│   └── DATA_MODEL.md             # cumulative model documentation
+│   └── DATA_MODEL.md                 # cumulative model documentation
 ├── reports/
-│   └── Report.txt                # generated cumulative engineering/audit report
+│   ├── Report.txt                    # cumulative engineering/audit report
+│   ├── operations_report.html        # final viewable business report
+│   ├── extracts/
+│   │   ├── company_week.csv
+│   │   ├── company_period.csv
+│   │   ├── property_week.csv
+│   │   ├── contractor.csv
+│   │   └── data_quality_summary.csv
+│   └── templates/
+│       └── operations_report.html.j2
 ├── sql/
 │   └── schema.sql
 ├── src/
@@ -1573,8 +1691,10 @@ operations report.
 │   ├── build_reporting_marts.py
 │   ├── check_visit_quality.py
 │   ├── database.py
+│   ├── generate_report.py
 │   ├── land_visit_batches.py
 │   ├── load_reference_data.py
+│   ├── pipeline_presenter.py
 │   ├── process_visit_state.py
 │   ├── run_pipeline.py
 │   ├── validate_visit_events.py
@@ -1583,8 +1703,9 @@ operations report.
 │   ├── test_analytical_facts.py
 │   ├── test_batch_landing.py
 │   ├── test_management_history.py
-│   ├── test_reporting_marts.py
 │   ├── test_reference_data.py
+│   ├── test_report.py
+│   ├── test_reporting_marts.py
 │   ├── test_visit_quality.py
 │   ├── test_visit_state.py
 │   └── test_visit_validation.py
@@ -1614,8 +1735,6 @@ operations report.
 - Add tests alongside each important business rule.
 - Keep the final business report understandable without requiring the reader to
   inspect Python code.
-
----
 
 ---
 

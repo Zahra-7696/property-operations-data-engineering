@@ -1,0 +1,4 @@
+company_id,company_name,visit_count,distinct_visitors,completed_visit_hours,unfinished_visits,incident_count,high_severity_incidents
+C01,Clover Management,514,228,639.75,32,89,8
+C02,Fern Management,511,222,684.75,29,83,14
+C03,Wattle Management,518,223,729.0,30,74,9

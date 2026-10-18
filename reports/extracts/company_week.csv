@@ -1,0 +1,19 @@
+company_id,company_name,week_start,visit_count,distinct_visitors,completed_visit_hours,unfinished_visits,incident_count,high_severity_incidents
+C01,Clover Management,2026-03-02,66,62,99.5,0,12,0
+C02,Fern Management,2026-03-02,76,64,98.0,4,14,1
+C03,Wattle Management,2026-03-02,75,67,114.75,3,11,0
+C01,Clover Management,2026-03-09,64,53,77.75,3,16,3
+C02,Fern Management,2026-03-09,84,72,109.5,6,11,2
+C03,Wattle Management,2026-03-09,107,83,153.5,5,14,2
+C01,Clover Management,2026-03-16,76,67,91.5,3,8,1
+C02,Fern Management,2026-03-16,98,82,143.5,3,11,0
+C03,Wattle Management,2026-03-16,95,82,123.0,10,12,0
+C01,Clover Management,2026-03-23,84,74,108.25,7,21,2
+C02,Fern Management,2026-03-23,77,68,91.0,5,13,6
+C03,Wattle Management,2026-03-23,87,68,124.75,4,18,4
+C01,Clover Management,2026-03-30,101,85,117.75,10,15,1
+C02,Fern Management,2026-03-30,91,77,137.0,8,15,3
+C03,Wattle Management,2026-03-30,79,69,101.0,5,10,1
+C01,Clover Management,2026-04-06,123,92,145.0,9,17,1
+C02,Fern Management,2026-04-06,85,73,105.75,3,19,2
+C03,Wattle Management,2026-04-06,75,63,112.0,3,9,2

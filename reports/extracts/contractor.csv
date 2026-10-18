@@ -1,0 +1,9 @@
+contractor_id,contractor_name,visit_count,distinct_visitors,property_count,completed_visit_hours,unfinished_visits
+K07,Field Crew 07,217,144,19,310.75,11
+K02,Field Crew 02,208,142,22,277.5,11
+K06,Field Crew 06,198,141,19,280.0,8
+K04,Field Crew 04,195,135,19,263.0,10
+K03,Field Crew 03,193,132,19,239.25,13
+K08,Field Crew 08,186,131,19,252.0,15
+K01,Field Crew 01,182,127,22,229.75,11
+K05,Field Crew 05,164,116,19,201.25,12

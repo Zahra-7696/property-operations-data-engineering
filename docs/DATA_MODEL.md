@@ -906,3 +906,83 @@ high-severity incidents    31
 
 Stage 10 uses these marts to build the final business-facing HTML report.
 
+---
+
+## Stage 10 — Operations report and model extracts
+
+### Scope
+
+Stage 10 is the presentation layer. It consumes only the stable Stage 9 marts and
+supporting load/quality metadata; it does not reimplement ingestion or modelling
+rules inside the report.
+
+The generated artifacts are:
+
+```text
+reports/operations_report.html
+reports/extracts/company_week.csv
+reports/extracts/company_period.csv
+reports/extracts/property_week.csv
+reports/extracts/contractor.csv
+reports/extracts/data_quality_summary.csv
+```
+
+### Report contents
+
+The self-contained HTML report includes:
+
+- six executive KPIs;
+- weekly visit and incident trends by historical managing company;
+- company requested-period totals;
+- all 144 property/week rows, including 22 zero-activity rows;
+- contractor visit activity;
+- load and data-quality evidence;
+- metric definitions;
+- findings and operational follow-up;
+- explicit limitations.
+
+### Reporting metadata
+
+`report_builds` stores one row for the most recent successful report generation:
+
+```text
+report_name
+generated_at
+report_path
+extract_directory
+latest_batch_id
+first_report_week
+last_report_week
+```
+
+This makes the final report generation visible in the same DuckDB model and allows
+the cumulative engineering audit report to include Stage 10.
+
+### Findings language
+
+The report intentionally distinguishes counts from conclusions. For example, the
+company with the most high-severity incidents is reported as having the highest
+**count**, not the highest risk, because the dataset does not provide a complete
+exposure denominator.
+
+Incidents are not attributed to contractors because no source relationship exists.
+Unfinished visits are highlighted for follow-up, but the data cannot determine
+whether a visitor remains on site or a checkout is missing.
+
+### Reviewer execution
+
+Interactive interview walkthrough:
+
+```text
+python -m src.run_pipeline --fresh
+```
+
+The runner explains each stage, prints its results and waits for Enter before the
+next stage.
+
+Unattended/CI rebuild:
+
+```text
+python -m src.run_pipeline --fresh --no-pause
+```
+

@@ -322,3 +322,18 @@ CREATE TABLE IF NOT EXISTS rpt_contractor (
     unfinished_visits BIGINT NOT NULL
 );
 
+-- Stage 10: generated report metadata.
+--
+-- The HTML report and CSV extracts are committed artifacts; this table records
+-- the most recent successful local report build for audit/reporting evidence.
+
+CREATE TABLE IF NOT EXISTS report_builds (
+    report_name VARCHAR PRIMARY KEY,
+    generated_at TIMESTAMPTZ NOT NULL,
+    report_path VARCHAR NOT NULL,
+    extract_directory VARCHAR NOT NULL,
+    latest_batch_id VARCHAR NOT NULL,
+    first_report_week DATE NOT NULL,
+    last_report_week DATE NOT NULL
+);
+

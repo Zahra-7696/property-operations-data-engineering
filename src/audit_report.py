@@ -1760,6 +1760,59 @@ def _stage_9_lines(
         ),
     ]
 
+
+def _has_stage10_results(
+    connection: duckdb.DuckDBPyConnection,
+) -> bool:
+    if not _table_exists(connection, "report_builds"):
+        return False
+
+    return connection.execute(
+        "SELECT COUNT(*) FROM report_builds"
+    ).fetchone()[0] > 0
+
+
+def _stage_10_lines(
+    connection: duckdb.DuckDBPyConnection,
+) -> list[str]:
+    build = connection.execute(
+        """
+        SELECT
+            report_name,
+            generated_at,
+            report_path,
+            extract_directory,
+            latest_batch_id,
+            first_report_week,
+            last_report_week
+        FROM report_builds
+        WHERE report_name = 'operations_report'
+        """
+    ).fetchone()
+
+    return [
+        "STAGE 10 - OPERATIONS REPORT",
+        _separator("-"),
+        (
+            "Purpose: render the reporting marts and quality/load evidence into "
+            "a self-contained HTML report plus committed modelled CSV extracts."
+        ),
+        "",
+        f"  Report name                : {build[0]}",
+        f"  Generated at               : {_format_utc(build[1])}",
+        f"  HTML path                  : {build[2]}",
+        f"  Extract directory          : {build[3]}",
+        f"  Latest processed batch     : {build[4]}",
+        f"  First requested week       : {build[5]}",
+        f"  Last requested week        : {build[6]}",
+        "",
+        (
+            "The HTML report includes KPIs, company weekly trends, a complete "
+            "property/week summary, contractor visit activity, data-quality/load "
+            "evidence, definitions, findings and limitations."
+        ),
+    ]
+
 def build_report_text(
     connection: duckdb.DuckDBPyConnection,
 ) -> str:
@@ -1801,6 +1854,9 @@ def build_report_text(
 
     if _has_stage9_results(connection):
         sections.append(_stage_9_lines(connection))
+
+    if _has_stage10_results(connection):
+        sections.append(_stage_10_lines(connection))
 
     return "\n\n".join("\n".join(section) for section in sections).rstrip() + "\n"
 

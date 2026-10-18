@@ -1,0 +1,9 @@
+measure,value,interpretation
+Physical visit-change input lines,1997,All source lines were preserved before parsing.
+Technical rejects,18,Malformed/incomplete event lines retained with evidence.
+Duplicate event deliveries,35,Repeated event_id deliveries counted once logically.
+Business-invalid active visits,3,Well-formed visits excluded from metrics by business rules.
+Deleted visit tombstones,51,Latest delete states retained to prevent stale resurrection.
+Valid visits outside requested weeks,21,Valid facts retained but outside this report period.
+Valid incidents outside requested weeks,1,Valid facts retained but outside this report period.
+Zero-activity property/week rows,22,Explicitly retained in the 24 x 6 property-week scaffold.
