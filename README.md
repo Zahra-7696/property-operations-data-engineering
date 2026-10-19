@@ -205,9 +205,9 @@ working correctly.
 | 10. Operations report | Build a polished report with KPIs, trends, summaries, findings and quality/load evidence | `reports/operations_report.html`, `reports/extracts/` | **Done** |
 | 11. CI and reproducibility | Rebuild and validate the complete project automatically from a clean checkout | `.github/workflows/ci.yml`, `src/acceptance_check.py` | **Done** |
 | 12. Production design | Document how the local solution could evolve for millions of records with security, monitoring, CI/CD and versioning | `docs/PRODUCTION_DESIGN.md` | **Done** |
-| 13. Interview walkthrough | Trace sample records from source to final metrics and explain design trade-offs | Interview-ready walkthrough | Not started |
-
 ---
+
+The repository implementation is complete through **Stage 12**. Interview preparation is intentionally kept outside the repository.
 
 ## Current implementation status
 
@@ -345,7 +345,6 @@ working correctly.
 
 ### Next
 
-- [ ] Prepare the final interview walkthrough
 
 ---
 
