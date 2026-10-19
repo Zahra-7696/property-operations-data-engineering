@@ -204,7 +204,7 @@ working correctly.
 | 9. Reporting marts | Build company/week, company-period, property/week and contractor reporting marts | `rpt_company_week`, `rpt_company_period`, `rpt_property_week`, `rpt_contractor` | **Done** |
 | 10. Operations report | Build a polished report with KPIs, trends, summaries, findings and quality/load evidence | `reports/operations_report.html`, `reports/extracts/` | **Done** |
 | 11. CI and reproducibility | Rebuild and validate the complete project automatically from a clean checkout | `.github/workflows/ci.yml`, `src/acceptance_check.py` | **Done** |
-| 12. Production design | Explain how the local solution could evolve using AWS/S3/event-driven services/Snowflake | Architecture document | Not started |
+| 12. Production design | Document how the local solution could evolve for millions of records with security, monitoring, CI/CD and versioning | `docs/PRODUCTION_DESIGN.md` | **Done** |
 | 13. Interview walkthrough | Trace sample records from source to final metrics and explain design trade-offs | Interview-ready walkthrough | Not started |
 
 ---
@@ -332,9 +332,19 @@ working correctly.
 - [x] Confirm Stage 11 tests pass (`5 passed`)
 - [x] Confirm full regression suite passes (`96 passed`)
 
+### Completed in Stage 12
+
+- [x] Document a production-scale design for millions of records
+- [x] Explain batch vs streaming and why row volume alone does not require Kafka
+- [x] Explain incremental/idempotent event processing and replay
+- [x] Document AWS and Snowflake security controls
+- [x] Document infrastructure and data-quality monitoring
+- [x] Explain CI/CD promotion and rollback
+- [x] Distinguish business, event, code/deployment and schema versioning
+- [x] Keep the production document reviewer-facing and independent of Onside's actual architecture
+
 ### Next
 
-- [ ] Document production-scale architecture
 - [ ] Prepare the final interview walkthrough
 
 ---
@@ -1663,6 +1673,140 @@ AWS/Snowflake environment.
 
 ---
 
+## Stage 12 — Production-scale design
+
+### Aim
+
+Stage 12 explains how the same data-engineering rules could be operated at a much
+larger production scale, for example several million visit/event records, without
+pretending that the local DuckDB implementation itself is the production
+architecture. The design keeps the assignment's core guarantees — immutable raw
+evidence, idempotent event handling, per-visit source-version precedence,
+historical management attribution and separate analytical grains — while moving
+storage, ingestion, transformations and operations to cloud-managed services. It
+also covers security, monitoring, CI/CD, schema evolution, versioning and rollback.
+
+### Design questions addressed
+
+- What changes when the dataset grows from a few thousand rows to millions of records?
+- When is batch or micro-batch sufficient, and when is streaming justified?
+- Where would raw data, event history, current state, facts and marts live?
+- How would duplicate delivery, stale versions, replay and failure recovery work?
+- How would AWS/Snowflake access be secured?
+- Which infrastructure and data-quality metrics should be monitored?
+- How should continuous delivery promote tested changes after CI?
+- Which layers require explicit versioning: source records, events, code, infrastructure and schemas?
+- How should risky data-model changes be promoted and rolled back safely?
+
+### How this stage solves them
+
+`docs/PRODUCTION_DESIGN.md` proposes an S3-based immutable raw layer, queue-backed
+decoupled ingestion, lightweight serverless validation/orchestration, incremental
+Snowflake loading and SQL/dbt transformations. It documents security, monitoring,
+CI/CD, schema/data-contract versioning, rollback and concise interview answers.
+
+### Why this stage exists
+
+The take-home intentionally uses a small local database, but the first interview
+also raised the question of much larger operational datasets. The local model's correctness rules still apply at scale while the execution
+architecture changes. The production design therefore focuses on scalability and
+operability without making assumptions about Onside's actual production
+infrastructure.
+
+### Proposed architecture
+
+```text
+Applications / APIs / exports
+            |
+            v
+       Amazon S3 raw
+            |
+            v
+       SQS / routing
+            |
+            v
+   Lambda orchestration
+            |
+            v
+ Snowflake RAW / staging
+            |
+            v
+   SQL / dbt models
+            |
+            v
+ facts -> marts -> BI/report
+```
+
+For file-based near-real-time loading, Snowpipe can load from S3 event
+notifications. For periodic data, scheduled/bulk loading may be simpler.
+
+### Scaling principle
+
+```text
+Scale the execution,
+not the business rules.
+```
+
+Millions of records alone does not require Kafka/Spark/Kubernetes. The decision
+should be based on arrival rate, latency SLA, concurrency, replay needs and number
+of consumers.
+
+### Security
+
+The document covers:
+
+```text
+least-privilege IAM
+S3 Block Public Access
+encryption / KMS where appropriate
+Secrets Manager
+environment separation
+Snowflake RBAC
+masking / row-access controls where needed
+audit logging
+```
+
+### Monitoring
+
+The proposed monitoring covers both systems and data:
+
+```text
+SQS backlog / oldest-message age / DLQ
+Lambda errors / duration / throttles
+source arrival and freshness
+Snowflake load/query/task failures and cost
+technical reject rate
+duplicate/stale event rates
+business-quality issue rate
+row-count reconciliation
+report freshness
+```
+
+### CI/CD and versioning
+
+The design distinguishes:
+
+```text
+source_version  -> business-record precedence
+event_id        -> idempotent event identity
+Git SHA/tag     -> deployed code version
+schema_version  -> event/data contract
+IaC version     -> cloud infrastructure definition
+```
+
+CI validates a change; CD promotes that tested version through environments with
+appropriate gates and rollback.
+
+### Document
+
+```text
+docs/PRODUCTION_DESIGN.md
+```
+
+This file contains the detailed reference architecture, operational controls and design rationale.
+
+---
+
 ## How a reviewer should run the project
 
 Run all commands from the **repository root** after creating/activating a Python
@@ -1814,7 +1958,8 @@ A DuckDB-capable GUI database client can also open the same file directly.
 │       └── ci.yml                    # clean rebuild + acceptance + pytest
 ├── docs/
 │   ├── ORIGINAL_ASSIGNMENT_BRIEF.md
-│   └── DATA_MODEL.md                 # cumulative model documentation
+│   ├── DATA_MODEL.md                 # cumulative model documentation
+│   └── PRODUCTION_DESIGN.md          # production-scale architecture and operations
 ├── reports/
 │   ├── Report.txt                    # cumulative engineering/audit report
 │   ├── operations_report.html        # final viewable business report
