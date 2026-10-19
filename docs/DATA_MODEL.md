@@ -986,3 +986,105 @@ Unattended/CI rebuild:
 python -m src.run_pipeline --fresh --no-pause
 ```
 
+---
+
+## Stage 11 — CI and reproducibility
+
+### Scope
+
+Stage 11 does not add a new business-data grain. The core data model is complete
+through the Stage 10 report.
+
+This stage turns the local rebuild/test process into an automated repository gate.
+
+### GitHub Actions workflow
+
+`.github/workflows/ci.yml` runs on:
+
+```text
+push
+pull request
+manual workflow dispatch
+```
+
+The job uses Python 3.11 on a fresh Ubuntu runner and performs:
+
+```text
+checkout
+-> install requirements
+-> verify immutable raw sources
+-> clean non-interactive Stage 1-10 rebuild
+-> final acceptance check
+-> full pytest regression suite
+-> confirm tracked raw data was not modified
+-> upload generated report artifacts
+```
+
+The workflow uses:
+
+```text
+python -m src.run_pipeline --fresh --no-pause
+```
+
+because the normal pipeline is intentionally interactive for interview
+walkthroughs.
+
+### `src/acceptance_check.py`
+
+The acceptance check is a small final gate across the already-tested layers.
+
+It confirms important counts such as:
+
+```text
+1,997 raw visit lines
+18 technical rejects
+1,944 unique events
+1,618 current visit states
+1,564 reportable visits
+37 management intervals
+1,564 visit facts
+247 incident facts
+18 company/week rows
+144 property/week rows
+22 zero-activity property/weeks
+8 contractor rows
+```
+
+It also checks:
+
+- latest completed batch is `batch_06`;
+- `reports/operations_report.html` exists and is substantial;
+- `reports/Report.txt` exists;
+- all five CSV extracts exist with their expected row counts.
+
+### Raw-data immutability in CI
+
+After the full rebuild and tests, CI runs:
+
+```text
+git diff --exit-code -- data/
+```
+
+The generated DuckDB database is ignored by Git, so this check focuses on tracked
+source data and fails if the pipeline accidentally modifies committed raw inputs.
+
+### CI artifacts
+
+A successful workflow uploads:
+
+```text
+reports/operations_report.html
+reports/Report.txt
+reports/extracts/*.csv
+```
+
+as a GitHub Actions artifact for convenient inspection.
+
+### Stage 11 tests
+
+Stage 11 adds lightweight tests for the CI/reproducibility configuration itself.
+They verify that the workflow has the expected triggers, rebuild/test commands,
+raw-data protection, artifact upload and acceptance-check coverage.
+
+The existing full suite remains the authoritative business-rule validation.
+

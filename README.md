@@ -203,10 +203,9 @@ working correctly.
 | 8. Analytical facts | Attribute visits/incidents historically, derive property-local weeks and UTC elapsed hours | `fact_visits`, `fact_incidents` | **Done** |
 | 9. Reporting marts | Build company/week, company-period, property/week and contractor reporting marts | `rpt_company_week`, `rpt_company_period`, `rpt_property_week`, `rpt_contractor` | **Done** |
 | 10. Operations report | Build a polished report with KPIs, trends, summaries, findings and quality/load evidence | `reports/operations_report.html`, `reports/extracts/` | **Done** |
-| 11. Full validation suite | Cover edge cases including replay, rollback, stale versions, transfer boundaries and DST | Automated test suite | Not started |
-| 12. CI and reproducibility | Run checks automatically from a clean Git checkout | GitHub Actions workflow | Not started |
-| 13. Production design | Explain how the solution could scale using AWS/S3/event-driven services/Snowflake | Architecture document | Not started |
-| 14. Interview walkthrough | Trace sample records from source to final metrics and explain trade-offs | Interview-ready walkthrough | Not started |
+| 11. CI and reproducibility | Rebuild and validate the complete project automatically from a clean checkout | `.github/workflows/ci.yml`, `src/acceptance_check.py` | **Done** |
+| 12. Production design | Explain how the local solution could evolve using AWS/S3/event-driven services/Snowflake | Architecture document | Not started |
+| 13. Interview walkthrough | Trace sample records from source to final metrics and explain design trade-offs | Interview-ready walkthrough | Not started |
 
 ---
 
@@ -320,9 +319,21 @@ working correctly.
 - [x] Confirm Stage 10 tests pass (`8 passed`)
 - [x] Confirm full regression suite passes (`91 passed`)
 
+### Completed in Stage 11
+
+- [x] Add a GitHub Actions workflow for push, pull request and manual runs
+- [x] Rebuild the complete Stage 1–10 project on a clean Python 3.11 runner
+- [x] Run a compact final acceptance gate after the clean rebuild
+- [x] Run the full pytest regression suite in CI
+- [x] Confirm the pipeline does not modify committed raw data
+- [x] Upload generated HTML/audit/CSV artifacts from successful CI runs
+- [x] Add lightweight tests for the CI/reproducibility configuration
+- [x] Confirm final acceptance checks pass
+- [x] Confirm Stage 11 tests pass (`5 passed`)
+- [x] Confirm full regression suite passes (`96 passed`)
+
 ### Next
 
-- [ ] Add CI/reproducibility automation
 - [ ] Document production-scale architecture
 - [ ] Prepare the final interview walkthrough
 
@@ -1289,7 +1300,6 @@ elapsed UTC time: 2.00 hours
 
 ```powershell
 python -m src.build_analytical_facts
-python -m src.build_reporting_marts
 ```
 
 Then:
@@ -1304,14 +1314,15 @@ metrics, historical-company proof, local-week proof and DST-duration proof.
 
 ### Validation / tests
 
-Stage 8 adds 11 stage-specific tests. They cover fact grains/counts, requested
+Stage 8 has 11 stage-specific tests covering fact grains/counts, requested
 weeks, historical company attribution, local week boundaries, DST elapsed hours,
 unfinished visits, requested-week metrics, idempotent rebuild and audit evidence.
 
-After Stage 8 is confirmed locally, the expected cumulative suite is:
+Confirmed at the Stage 8 checkpoint:
 
 ```text
-71 passed
+Stage 8 tests: 11 passed
+Cumulative tests after Stage 8: 71 passed
 ```
 
 ### Boundary
@@ -1529,6 +1540,129 @@ Full regression suite: 91 passed
 
 ---
 
+## Stage 11 — CI and reproducibility
+
+### Aim
+
+Stage 11 proves that the finished project is not only correct on one laptop but
+can be rebuilt and validated automatically from a clean Git checkout. It adds a
+GitHub Actions workflow that installs dependencies on Python 3.11, verifies the
+immutable source data, rebuilds the complete Stage 1–10 pipeline without pauses,
+runs a final cross-layer acceptance check, executes the full pytest suite, confirms
+the committed raw data was not changed and uploads the generated report artifacts.
+No new business logic is introduced in this stage.
+
+### Questions answered
+
+- Can a fresh GitHub runner rebuild the complete project from committed sources?
+- Does the rebuilt repository produce the expected final model counts and artifacts?
+- Do all automated business-rule tests still pass outside the developer machine?
+- Does the pipeline leave the committed raw data unchanged?
+- Can reviewers retrieve the generated HTML, audit report and extracts from CI?
+
+### How this stage solves them
+
+`.github/workflows/ci.yml` defines the automated GitHub Actions job.
+`src/acceptance_check.py` verifies important counts across source, state,
+quality, history, fact, mart and report layers after the clean rebuild. The workflow
+then runs the full pytest suite and uploads the generated reporting artifacts.
+
+### Why this stage exists
+
+A reproducible data project should not depend on a developer's existing DuckDB
+file, terminal state or Windows configuration. Running the complete workflow on a
+fresh Linux runner demonstrates that committed source files plus code are enough
+to recreate the database models, report and validation results.
+
+### CI sequence
+
+```text
+GitHub push / pull request / manual run
+              |
+              v
+       Clean repository checkout
+              |
+              v
+         Python 3.11 setup
+              |
+              v
+       Install requirements.txt
+              |
+              v
+       Verify raw source integrity
+              |
+              v
+python -m src.run_pipeline --fresh --no-pause
+              |
+              v
+     Final acceptance check
+              |
+              v
+       Full pytest regression
+              |
+              v
+       Raw-data Git diff check
+              |
+              v
+       Upload report artifacts
+```
+
+### Local Stage 11 checks
+
+First run the acceptance gate against the already-built local project:
+
+```powershell
+python -m src.acceptance_check
+```
+
+Then run the Stage 11 configuration tests:
+
+```powershell
+python -m pytest tests/test_ci_reproducibility.py -q
+```
+
+Then run the complete suite:
+
+```powershell
+python -m pytest -q
+```
+
+Stage 11 adds **5 lightweight configuration tests**.
+
+Confirmed locally:
+
+```text
+Final acceptance check: passed
+Stage 11 tests: 5 passed
+Full regression suite: 96 passed
+```
+
+### GitHub Actions artifact
+
+A successful CI run publishes an artifact named:
+
+```text
+property-operations-report
+```
+
+containing:
+
+```text
+reports/operations_report.html
+reports/Report.txt
+reports/extracts/*.csv
+```
+
+### Boundary
+
+Stage 11 validates reproducibility and repository automation. It does not change
+the Stage 1–10 business definitions or reporting metrics.
+
+Stage 12 documents how this local design could scale in a production
+AWS/Snowflake environment.
+
+---
+
 ## How a reviewer should run the project
 
 Run all commands from the **repository root** after creating/activating a Python
@@ -1595,16 +1729,24 @@ reports/Report.txt
 
 ### Final automated verification
 
-After the rebuild, run the complete regression suite:
+After the rebuild, run the final acceptance gate:
+
+```powershell
+python -m src.acceptance_check
+```
+
+Then run the complete regression suite:
 
 ```powershell
 python -m pytest -q
 ```
 
-The verified Stage 10 repository state passes:
+The verified final repository state is:
 
 ```text
-91 passed
+Final acceptance check: passed
+Stage 11 CI/reproducibility tests: 5 passed
+Full regression suite: 96 passed
 ```
 
 ---
@@ -1667,6 +1809,9 @@ A DuckDB-capable GUI database client can also open the same file directly.
 │   │   ├── batch_05.jsonl
 │   │   └── batch_06.jsonl
 │   └── modelled/                     # generated DuckDB; ignored by Git
+├── .github/
+│   └── workflows/
+│       └── ci.yml                    # clean rebuild + acceptance + pytest
 ├── docs/
 │   ├── ORIGINAL_ASSIGNMENT_BRIEF.md
 │   └── DATA_MODEL.md                 # cumulative model documentation
@@ -1685,6 +1830,7 @@ A DuckDB-capable GUI database client can also open the same file directly.
 │   └── schema.sql
 ├── src/
 │   ├── __init__.py
+│   ├── acceptance_check.py
 │   ├── audit_report.py
 │   ├── build_analytical_facts.py
 │   ├── build_management_history.py
@@ -1702,6 +1848,7 @@ A DuckDB-capable GUI database client can also open the same file directly.
 ├── tests/
 │   ├── test_analytical_facts.py
 │   ├── test_batch_landing.py
+│   ├── test_ci_reproducibility.py
 │   ├── test_management_history.py
 │   ├── test_reference_data.py
 │   ├── test_report.py

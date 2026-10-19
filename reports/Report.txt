@@ -1058,9 +1058,9 @@ STAGE 10 - OPERATIONS REPORT
 Purpose: render the reporting marts and quality/load evidence into a self-contained HTML report plus committed modelled CSV extracts.
 
   Report name                : operations_report
-  Generated at               : 2026-10-18T23:17:31Z
-  HTML path                  : C:\Users\Zahraa\AppData\Local\Temp\pytest-of-Zahraa\pytest-89\stage100\reports\operations_report.html
-  Extract directory          : C:\Users\Zahraa\AppData\Local\Temp\pytest-of-Zahraa\pytest-89\stage100\reports\extracts
+  Generated at               : 2026-10-19T00:01:28Z
+  HTML path                  : C:\Users\Zahraa\AppData\Local\Temp\pytest-of-Zahraa\pytest-90\stage100\reports\operations_report.html
+  Extract directory          : C:\Users\Zahraa\AppData\Local\Temp\pytest-of-Zahraa\pytest-90\stage100\reports\extracts
   Latest processed batch     : batch_06
   First requested week       : 2026-03-02
   Last requested week        : 2026-04-06

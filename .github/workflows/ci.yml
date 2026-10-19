@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Clean rebuild and validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      PYTHONHASHSEED: "0"
+      TZ: UTC
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Verify immutable source data
+        run: python -m src.verify_sources
+
+      - name: Rebuild complete project from raw sources
+        run: python -m src.run_pipeline --fresh --no-pause
+
+      - name: Run final acceptance checks
+        run: python -m src.acceptance_check
+
+      - name: Run full regression suite
+        run: python -m pytest -q
+
+      - name: Confirm committed raw data was not modified
+        run: git diff --exit-code -- data/
+
+      - name: Upload generated report artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: property-operations-report
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            reports/operations_report.html
+            reports/Report.txt
+            reports/extracts/*.csv
