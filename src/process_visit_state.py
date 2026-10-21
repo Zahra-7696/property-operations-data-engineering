@@ -567,6 +567,18 @@ def main() -> None:
         duplicates = fetch_duplicate_deliveries(connection)
         stale_events = fetch_stale_events(connection)
 
+        deleted_samples = connection.execute(
+            """
+            SELECT
+                visit_id, source_version, winning_event_id,
+                source_batch_id, source_line_number
+            FROM visit_current_state
+            WHERE is_deleted = TRUE
+            ORDER BY visit_id
+            LIMIT 10
+            """
+        ).fetchall()
+
         key_states_raw = connection.execute(
             """
             SELECT
@@ -648,6 +660,35 @@ def main() -> None:
     print(f"Deleted current visits      : {deleted_visits}")
 
     print()
+    print("STATE-RETENTION SUMMARY")
+    print("-" * 116)
+    print(
+        format_text_table(
+            headers=["Measure", "Count", "Meaning"],
+            rows=[
+                (
+                    "Deleted visit tombstones",
+                    deleted_visits,
+                    "Latest delete states retained to prevent stale resurrection.",
+                )
+            ],
+            widths=[34, 8, 64],
+        )
+    )
+    print("\nDELETED TOMBSTONE SAMPLE (FIRST 10)")
+    print("-" * 116)
+    print(
+        format_text_table(
+            headers=["Visit", "Version", "Winning event", "Winning source"],
+            rows=[
+                (visit_id, version, event_id, f"{batch_id}:{line_number}")
+                for visit_id, version, event_id, batch_id, line_number in deleted_samples
+            ],
+            widths=[14, 8, 14, 24],
+        )
+    )
+
+    print()
     print("KEY VERSION / DELETE EXAMPLES")
     print("-" * 116)
     print(
@@ -671,8 +712,9 @@ def main() -> None:
     print(format_duplicate_delivery_table(duplicates))
 
     print()
-    print("STALE / EQUAL-VERSION EVENT DETAILS")
+    print("STALE / EQUAL-VERSION EVENT DETAILS - INCOMING VS EXISTING STATE")
     print("-" * 116)
+    print("Incoming = event being processed; existing = applied state for the same visit immediately before it.")
     print(format_stale_event_table(stale_events))
 
     print()

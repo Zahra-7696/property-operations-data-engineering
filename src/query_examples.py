@@ -389,13 +389,46 @@ WHERE event_id = 'E00275';
 
 STAGE_4_REJECTS = """
 SELECT
-    batch_id,
-    line_number,
-    reason_codes,
-    rejection_reason,
-    raw_payload
-FROM visit_event_rejects
-ORDER BY batch_id, line_number;
+    r.batch_id,
+    r.line_number,
+
+    COALESCE(
+        NULLIF(
+            regexp_extract(
+                r.raw_payload,
+                '"event_id"\\s*:\\s*"([^"]+)"',
+                1
+            ),
+            ''
+        ),
+        'TRUNCATED'
+    ) AS event_id,
+
+    CASE
+        WHEN r.reason_codes = 'malformed_json'
+            THEN 'Malformed JSON'
+        WHEN r.reason_codes = 'invalid_updated_at'
+            THEN 'Invalid timestamp'
+        ELSE 'Incomplete upsert'
+    END AS category,
+
+    CASE
+        WHEN r.reason_codes = 'malformed_json'
+            THEN 'JSON syntax is incomplete / cannot be parsed.'
+        WHEN r.reason_codes = 'invalid_updated_at'
+            THEN 'updated_at is not a timezone-aware ISO 8601 timestamp.'
+        ELSE 'Required upsert fields are missing or invalid.'
+    END AS reason,
+
+    r.reason_codes,
+    r.rejection_reason,
+    b.source_file || ':' || CAST(r.line_number AS VARCHAR) AS source_reference,
+    r.raw_payload AS raw_source_record
+
+FROM visit_event_rejects AS r
+JOIN ingestion_batches AS b
+    ON b.batch_id = r.batch_id
+ORDER BY b.manifest_order, r.line_number;
 """
 
 PREVIEW_VALIDATED_VISIT_EVENTS = """
@@ -503,17 +536,23 @@ LIMIT 10;
 
 STAGE_5_V02_EVENT_HISTORY = """
 SELECT
-    event_id,
-    visit_id,
-    source_version,
-    operation,
-    state_action,
-    prior_source_version,
-    first_batch_id,
-    first_line_number
-FROM visit_events
-WHERE visit_id = 'V02'
-ORDER BY source_version, event_id;
+    e.event_id,
+    e.visit_id,
+    e.source_version,
+    e.operation,
+    e.state_action,
+    e.prior_source_version,
+    b.manifest_order,
+    b.source_file,
+    e.first_batch_id,
+    e.first_line_number
+FROM visit_events AS e
+JOIN ingestion_batches AS b
+    ON b.batch_id = e.first_batch_id
+WHERE e.visit_id = 'V02'
+ORDER BY
+    b.manifest_order,
+    e.first_line_number;
 """
 
 STAGE_5_V02_DUPLICATE = """
@@ -541,18 +580,24 @@ WHERE visit_id = 'V02';
 
 STAGE_5_CORRECTION_HISTORY = """
 SELECT
-    event_id,
-    visit_id,
-    source_version,
-    started_at,
-    ended_at,
-    state_action,
-    prior_source_version,
-    first_batch_id,
-    first_line_number
-FROM visit_events
-WHERE visit_id = 'SYN_V00256'
-ORDER BY source_version;
+    e.event_id,
+    e.visit_id,
+    e.source_version,
+    e.started_at,
+    e.ended_at,
+    e.state_action,
+    e.prior_source_version,
+    b.manifest_order,
+    b.source_file,
+    e.first_batch_id,
+    e.first_line_number
+FROM visit_events AS e
+JOIN ingestion_batches AS b
+    ON b.batch_id = e.first_batch_id
+WHERE e.visit_id = 'SYN_V00256'
+ORDER BY
+    b.manifest_order,
+    e.first_line_number;
 """
 
 STAGE_5_CORRECTION_WINNER = """
@@ -564,6 +609,188 @@ SELECT
     winning_event_id
 FROM visit_current_state
 WHERE visit_id = 'SYN_V00256';
+"""
+
+
+# Trace the complete event history for the same visit as stale event E00680.
+# This proves E00680 belongs to SYN_V00228 (not the truncated SYN_V002 shown by
+# an earlier fixed-width report format).
+STAGE_5_SYN_V00228_EVENT_HISTORY = """
+SELECT
+    e.visit_id,
+    e.event_id,
+    e.source_version,
+    e.operation,
+    e.state_action,
+    e.prior_source_version,
+    b.source_file,
+    e.first_line_number,
+    e.updated_at,
+    e.property_id,
+    e.contractor_id,
+    e.visitor_id,
+    e.started_at,
+    e.ended_at
+FROM visit_events AS e
+JOIN ingestion_batches AS b
+    ON b.batch_id = e.first_batch_id
+WHERE e.visit_id = 'SYN_V00228'
+ORDER BY
+    b.manifest_order,
+    e.first_line_number;
+"""
+
+
+# Reconstruct the exact current applied record that existed when E00680 arrived.
+# Processing order is manifest_order, then physical line number. source_version
+# decides the state change; updated_at is not used as the precedence key.
+STAGE_5_E00680_INCOMING_VS_EXISTING = """
+WITH ordered_events AS (
+    SELECT
+        e.*,
+        b.manifest_order,
+        b.source_file
+    FROM visit_events AS e
+    JOIN ingestion_batches AS b
+        ON b.batch_id = e.first_batch_id
+),
+
+incoming AS (
+    SELECT *
+    FROM ordered_events
+    WHERE event_id = 'E00680'
+),
+
+existing_at_that_time AS (
+    SELECT p.*
+    FROM ordered_events AS p
+    CROSS JOIN incoming AS i
+    WHERE p.visit_id = i.visit_id
+      AND p.state_action = 'applied'
+      AND (
+            p.manifest_order < i.manifest_order
+            OR (
+                p.manifest_order = i.manifest_order
+                AND p.first_line_number < i.first_line_number
+            )
+      )
+    ORDER BY
+        p.manifest_order DESC,
+        p.first_line_number DESC
+    LIMIT 1
+)
+
+SELECT
+    i.visit_id,
+
+    i.event_id AS incoming_event_id,
+    i.source_version AS incoming_version,
+    i.source_file AS incoming_file,
+    i.first_line_number AS incoming_line,
+
+    p.event_id AS existing_event_id,
+    p.source_version AS existing_version,
+    p.source_file AS existing_file,
+    p.first_line_number AS existing_line,
+
+    CASE
+        WHEN i.source_version > p.source_version
+            THEN 'APPLIED'
+        WHEN i.source_version = p.source_version
+            THEN 'STALE - EQUAL VERSION'
+        ELSE
+            'STALE - LOWER VERSION'
+    END AS decision
+
+FROM incoming AS i
+CROSS JOIN existing_at_that_time AS p;
+"""
+
+
+# For equal-version E00680, verify every state field used by the Stage 5
+# consistency guard matches the previously applied state.
+STAGE_5_E00680_FIELD_COMPARISON = """
+WITH ordered_events AS (
+    SELECT
+        e.*,
+        b.manifest_order,
+        b.source_file
+    FROM visit_events AS e
+    JOIN ingestion_batches AS b
+        ON b.batch_id = e.first_batch_id
+),
+
+incoming AS (
+    SELECT *
+    FROM ordered_events
+    WHERE event_id = 'E00680'
+),
+
+existing_at_that_time AS (
+    SELECT p.*
+    FROM ordered_events AS p
+    CROSS JOIN incoming AS i
+    WHERE p.visit_id = i.visit_id
+      AND p.state_action = 'applied'
+      AND (
+            p.manifest_order < i.manifest_order
+            OR (
+                p.manifest_order = i.manifest_order
+                AND p.first_line_number < i.first_line_number
+            )
+      )
+    ORDER BY
+        p.manifest_order DESC,
+        p.first_line_number DESC
+    LIMIT 1
+)
+
+SELECT
+    i.visit_id,
+
+    i.event_id AS incoming_event,
+    p.event_id AS existing_event,
+
+    i.source_version AS incoming_version,
+    p.source_version AS existing_version,
+
+    i.operation,
+    p.operation AS existing_operation,
+    i.operation IS NOT DISTINCT FROM p.operation
+        AS operation_matches,
+
+    i.updated_at,
+    p.updated_at AS existing_updated_at,
+    i.updated_at IS NOT DISTINCT FROM p.updated_at
+        AS updated_at_matches,
+
+    i.property_id,
+    p.property_id AS existing_property_id,
+    i.property_id IS NOT DISTINCT FROM p.property_id
+        AS property_matches,
+
+    i.contractor_id,
+    p.contractor_id AS existing_contractor_id,
+    i.contractor_id IS NOT DISTINCT FROM p.contractor_id
+        AS contractor_matches,
+
+    i.visitor_id,
+    p.visitor_id AS existing_visitor_id,
+    i.visitor_id IS NOT DISTINCT FROM p.visitor_id
+        AS visitor_matches,
+
+    i.started_at,
+    p.started_at AS existing_started_at,
+    i.started_at IS NOT DISTINCT FROM p.started_at
+        AS started_at_matches,
+
+    i.ended_at,
+    p.ended_at AS existing_ended_at,
+    i.ended_at IS NOT DISTINCT FROM p.ended_at
+        AS ended_at_matches
+
+FROM incoming AS i
+CROSS JOIN existing_at_that_time AS p;
 """
 
 PREVIEW_VISIT_EVENTS = """
@@ -584,6 +811,55 @@ FROM visit_current_state
 LIMIT 10;
 """
 
+
+
+# Discover repeated physical deliveries directly from the validated delivery layer.
+# delivery_number=1 is the canonical first occurrence; later occurrences are
+# duplicates and should map to visit_event_duplicates rather than update state.
+STAGE_5_DUPLICATE_DISCOVERY = """
+WITH deliveries AS (
+    SELECT
+        v.event_id,
+        v.visit_id,
+        v.batch_id,
+        b.source_file,
+        v.line_number,
+        b.manifest_order,
+        ROW_NUMBER() OVER (
+            PARTITION BY v.event_id
+            ORDER BY b.manifest_order, v.line_number
+        ) AS delivery_number,
+        COUNT(*) OVER (PARTITION BY v.event_id) AS delivery_count
+    FROM validated_visit_events AS v
+    JOIN ingestion_batches AS b
+        ON b.batch_id = v.batch_id
+)
+SELECT
+    event_id,
+    visit_id,
+    CASE WHEN delivery_number = 1 THEN 'CANONICAL' ELSE 'DUPLICATE' END AS delivery_role,
+    source_file,
+    line_number,
+    delivery_number,
+    delivery_count
+FROM deliveries
+WHERE delivery_count > 1
+ORDER BY event_id, delivery_number;
+"""
+
+
+STAGE_5_DELETED_TOMBSTONES = """
+SELECT
+    visit_id,
+    source_version,
+    operation,
+    winning_event_id,
+    source_batch_id,
+    source_line_number
+FROM visit_current_state
+WHERE is_deleted = TRUE
+ORDER BY visit_id;
+"""
 
 # =============================================================================
 # STAGE 6 — BUSINESS QUALITY
@@ -756,28 +1032,159 @@ ORDER BY valid_from;
 """
 
 STAGE_7_P03_BOUNDARY = """
+WITH records AS (
+    SELECT
+        'visit' AS record_type,
+        visit_id AS record_id,
+        property_id,
+        started_at AS business_time
+    FROM visit_current_state
+    WHERE visit_id IN ('V09', 'V10')
+
+    UNION ALL
+
+    SELECT
+        'incident',
+        incident_id,
+        property_id,
+        reported_at
+    FROM src_incidents
+    WHERE incident_id IN ('I06', 'I07')
+)
 SELECT
-    'visit' AS record_type,
-    visit_id AS record_id,
-    property_id,
-    started_at AS business_time,
-    company_id
-FROM fact_visits
-WHERE visit_id IN ('V09', 'V10')
-
-UNION ALL
-
-SELECT
-    'incident' AS record_type,
-    incident_id AS record_id,
-    property_id,
-    reported_at AS business_time,
-    company_id
-FROM fact_incidents
-WHERE incident_id IN ('I06', 'I07')
-
-ORDER BY business_time, record_type, record_id;
+    r.record_type,
+    r.record_id,
+    r.property_id,
+    r.business_time,
+    m.company_id
+FROM records AS r
+JOIN property_management_intervals AS m
+    ON m.property_id = r.property_id
+   AND r.business_time >= m.valid_from
+   AND (m.valid_to IS NULL OR r.business_time < m.valid_to)
+ORDER BY r.business_time, r.record_type, r.record_id;
 """
+
+
+
+# Re-perform the historical interval join for the P03 boundary records.
+STAGE_7_P03_BOUNDARY_JOIN_PROOF = """
+WITH records AS (
+    SELECT 'visit' AS record_type, visit_id AS record_id, property_id, started_at AS business_time
+    FROM visit_current_state
+    WHERE visit_id IN ('V09', 'V10')
+    UNION ALL
+    SELECT 'incident', incident_id, property_id, reported_at
+    FROM src_incidents
+    WHERE incident_id IN ('I06', 'I07')
+)
+SELECT
+    r.record_type, r.record_id, r.property_id, r.business_time,
+    m.company_id, m.valid_from, m.valid_to,
+    r.business_time >= m.valid_from AS after_or_at_start,
+    (m.valid_to IS NULL OR r.business_time < m.valid_to) AS before_end
+FROM records AS r
+JOIN property_management_intervals AS m
+    ON m.property_id = r.property_id
+   AND r.business_time >= m.valid_from
+   AND (m.valid_to IS NULL OR r.business_time < m.valid_to)
+ORDER BY r.business_time, r.record_type, r.record_id;
+"""
+
+STAGE_7_PROPERTY_AT_TIMESTAMP = """
+-- Edit lookup_mode to either 'exact' or 'range'.
+--
+-- exact:
+--   Returns the single historical management interval containing exact_time.
+--
+-- range:
+--   Returns every management interval for the property that overlaps
+--   [from_time, to_time).
+WITH params AS (
+    SELECT
+        'P03'::VARCHAR AS property_id,
+        'exact'::VARCHAR AS lookup_mode,
+        TIMESTAMPTZ '2026-03-29 12:59:00+00' AS exact_time,
+        TIMESTAMPTZ '2026-03-01 00:00:00+00' AS from_time,
+        TIMESTAMPTZ '2026-04-15 00:00:00+00' AS to_time
+)
+SELECT
+    p.property_id,
+    pr.property_name,
+    p.lookup_mode,
+
+    CASE
+        WHEN p.lookup_mode = 'exact' THEN p.exact_time
+        ELSE p.from_time
+    END AS requested_from,
+
+    CASE
+        WHEN p.lookup_mode = 'exact' THEN p.exact_time
+        ELSE p.to_time
+    END AS requested_to,
+
+    i.company_id,
+    c.company_name,
+    i.valid_from,
+    i.valid_to,
+
+    CASE
+        WHEN p.lookup_mode = 'exact'
+            THEN p.exact_time
+        ELSE GREATEST(i.valid_from, p.from_time)
+    END AS matched_from,
+
+    CASE
+        WHEN p.lookup_mode = 'exact'
+            THEN p.exact_time
+        WHEN i.valid_to IS NULL
+            THEN p.to_time
+        ELSE LEAST(i.valid_to, p.to_time)
+    END AS matched_to
+
+FROM params AS p
+JOIN property_management_intervals AS i
+    ON i.property_id = p.property_id
+JOIN src_properties AS pr
+    ON pr.property_id = i.property_id
+JOIN src_companies AS c
+    ON c.company_id = i.company_id
+
+WHERE
+    (
+        p.lookup_mode = 'exact'
+        AND p.exact_time >= i.valid_from
+        AND (i.valid_to IS NULL OR p.exact_time < i.valid_to)
+    )
+    OR
+    (
+        p.lookup_mode = 'range'
+        AND p.from_time < p.to_time
+        AND i.valid_from < p.to_time
+        AND (i.valid_to IS NULL OR i.valid_to > p.from_time)
+    )
+
+ORDER BY i.valid_from;
+"""
+
+STAGE_7_COMPANY_PROPERTIES_IN_RANGE = """
+WITH params AS (
+    SELECT 'C01'::VARCHAR AS company_id,
+           TIMESTAMPTZ '2026-03-23 00:00:00+00' AS from_time,
+           TIMESTAMPTZ '2026-03-30 00:00:00+00' AS to_time
+)
+SELECT
+    i.company_id, c.company_name, i.property_id, p.property_name,
+    i.valid_from, i.valid_to
+FROM property_management_intervals AS i
+JOIN params AS x ON i.company_id = x.company_id
+JOIN src_companies AS c ON c.company_id = i.company_id
+JOIN src_properties AS p ON p.property_id = i.property_id
+WHERE i.valid_from < x.to_time
+  AND (i.valid_to IS NULL OR i.valid_to > x.from_time)
+ORDER BY i.property_id, i.valid_from;
+"""
+
 
 PREVIEW_PROPERTY_MANAGEMENT_INTERVALS = """
 SELECT *
@@ -891,6 +1298,265 @@ FROM fact_visits
 WHERE visit_id IN ('V07', 'V16')
 ORDER BY visit_id;
 """
+
+
+
+STAGE_8_HISTORICAL_ATTRIBUTION_BY_PROPERTY_RANGE = """
+WITH params AS (
+    SELECT
+        'P11'::VARCHAR AS property_id,
+        TIMESTAMPTZ '2026-03-22 18:00:00+00' AS from_time,
+        TIMESTAMPTZ '2026-03-23 06:00:00+00' AS to_time
+),
+activity AS (
+    SELECT
+        'visit' AS record_type, visit_id AS record_id, property_id,
+        started_at AS business_time, company_id, company_name
+    FROM fact_visits
+    UNION ALL
+    SELECT
+        'incident', incident_id, property_id, reported_at, company_id, company_name
+    FROM fact_incidents
+)
+SELECT
+    a.record_type, a.record_id, a.property_id, a.business_time,
+    a.company_id, a.company_name
+FROM activity AS a
+CROSS JOIN params AS p
+WHERE a.property_id = p.property_id
+  AND a.business_time >= p.from_time
+  AND a.business_time < p.to_time
+ORDER BY a.business_time, a.record_type, a.record_id;
+"""
+
+# Compatibility alias for older code paths.
+STAGE_8_P11_HISTORICAL_ATTRIBUTION = STAGE_8_HISTORICAL_ATTRIBUTION_BY_PROPERTY_RANGE
+
+STAGE_8_ALL_LOCAL_WEEK_SHIFTS = """
+SELECT
+    visit_id, property_id, property_name, property_timezone,
+    started_at, local_started_at,
+    CAST(DATE_TRUNC('week', started_at AT TIME ZONE 'UTC') AS DATE) AS utc_week_start,
+    week_start_local
+FROM fact_visits
+WHERE CAST(DATE_TRUNC('week', started_at AT TIME ZONE 'UTC') AS DATE) <> week_start_local
+ORDER BY started_at, visit_id;
+"""
+
+STAGE_8_VISITS_BY_HISTORICAL_COMPANY_RANGE = """
+-- fact_visits.company_name is the historical managing company attributed at
+-- the visit's started_at timestamp.
+WITH params AS (
+    SELECT
+        'Clover Management'::VARCHAR AS company_name,
+        TIMESTAMPTZ '2026-03-01 00:00:00+00' AS from_time,
+        TIMESTAMPTZ '2026-04-14 00:00:00+00' AS to_time
+)
+SELECT
+    f.company_id,
+    f.company_name AS historical_company,
+    f.property_id,
+    f.property_name,
+    f.visit_id,
+    f.visitor_id,
+    f.contractor_id,
+    f.contractor_name,
+    f.started_at,
+    f.ended_at,
+    CASE
+        WHEN f.is_unfinished THEN 'unfinished'
+        ELSE 'completed'
+    END AS visit_status,
+    f.completed_hours,
+    f.local_started_at,
+    f.local_ended_at,
+    f.week_start_local,
+    f.is_requested_week
+FROM fact_visits AS f
+CROSS JOIN params AS p
+WHERE f.company_name = p.company_name
+  AND f.started_at >= p.from_time
+  AND f.started_at < p.to_time
+ORDER BY f.started_at, f.property_id, f.visit_id;
+"""
+
+
+STAGE_8_VISITS_BY_CONTRACTOR_RANGE = """
+WITH params AS (
+    SELECT
+        'Field Crew 07'::VARCHAR AS contractor_name,
+        TIMESTAMPTZ '2026-03-01 00:00:00+00' AS from_time,
+        TIMESTAMPTZ '2026-04-14 00:00:00+00' AS to_time
+)
+SELECT
+    f.contractor_id,
+    f.contractor_name,
+    f.visit_id,
+    f.visitor_id,
+    f.company_id,
+    f.company_name AS historical_company,
+    f.property_id,
+    f.property_name,
+    f.started_at,
+    f.ended_at,
+    CASE
+        WHEN f.is_unfinished THEN 'unfinished'
+        ELSE 'completed'
+    END AS visit_status,
+    f.completed_hours,
+    f.local_started_at,
+    f.local_ended_at,
+    f.week_start_local,
+    f.is_requested_week
+FROM fact_visits AS f
+CROSS JOIN params AS p
+WHERE f.contractor_name = p.contractor_name
+  AND f.started_at >= p.from_time
+  AND f.started_at < p.to_time
+ORDER BY f.started_at, f.company_name, f.property_id, f.visit_id;
+"""
+
+
+STAGE_8_VISIT_STATUS_BY_COMPANY_PROPERTY = """
+WITH params AS (
+    SELECT
+        'Clover Management'::VARCHAR AS company_name,
+        NULL::VARCHAR AS property_name
+)
+SELECT
+    f.company_id,
+    f.company_name,
+    f.property_id,
+    f.property_name,
+    COUNT(*) AS visit_count,
+    SUM(CASE WHEN f.is_unfinished THEN 1 ELSE 0 END) AS unfinished_visits,
+    SUM(CASE WHEN NOT f.is_unfinished THEN 1 ELSE 0 END) AS completed_visits,
+    ROUND(SUM(COALESCE(f.completed_hours, 0)), 2) AS completed_hours
+FROM fact_visits AS f
+CROSS JOIN params AS p
+WHERE (p.company_name IS NULL OR f.company_name = p.company_name)
+  AND (p.property_name IS NULL OR f.property_name = p.property_name)
+GROUP BY f.company_id, f.company_name, f.property_id, f.property_name
+ORDER BY f.company_name, f.property_name;
+"""
+
+STAGE_8_UNFINISHED_VISITS = """
+SELECT
+    visit_id, company_id, company_name, property_id, property_name, visitor_id,
+    started_at, local_started_at, week_start_local, completed_hours, is_requested_week
+FROM fact_visits
+WHERE is_unfinished = TRUE
+ORDER BY company_id, property_id, started_at, visit_id;
+"""
+
+STAGE_8_COMPLETED_VISITS = """
+SELECT
+    visit_id, company_id, company_name, property_id, property_name, visitor_id,
+    started_at, ended_at, completed_hours, week_start_local, is_requested_week
+FROM fact_visits
+WHERE is_unfinished = FALSE
+ORDER BY company_id, property_id, started_at, visit_id;
+"""
+
+STAGE_8_VISITS_BY_LOCAL_DATE_RANGE = """
+WITH params AS (
+    SELECT DATE '2026-03-23' AS from_date, DATE '2026-03-23' AS to_date
+)
+SELECT
+    f.visit_id, f.company_id, f.company_name, f.property_id, f.property_name,
+    f.contractor_id, f.contractor_name, f.visitor_id,
+    f.started_at, f.local_started_at, f.ended_at, f.completed_hours,
+    f.is_unfinished, f.week_start_local, f.is_requested_week
+FROM fact_visits AS f
+CROSS JOIN params AS p
+WHERE CAST(f.local_started_at AS DATE) BETWEEN p.from_date AND p.to_date
+ORDER BY f.local_started_at, f.visit_id;
+"""
+
+STAGE_8_INCIDENTS_BY_LOCAL_DATE_RANGE = """
+WITH params AS (
+    SELECT DATE '2026-03-23' AS from_date, DATE '2026-03-23' AS to_date
+)
+SELECT
+    f.incident_id, f.company_id, f.company_name, f.property_id, f.property_name,
+    f.reported_at, f.local_reported_at, f.severity, f.is_high,
+    f.week_start_local, f.is_requested_week
+FROM fact_incidents AS f
+CROSS JOIN params AS p
+WHERE CAST(f.local_reported_at AS DATE) BETWEEN p.from_date AND p.to_date
+ORDER BY f.local_reported_at, f.incident_id;
+"""
+
+STAGE_8_VISITS_OUTSIDE_REQUESTED_WEEKS = """
+SELECT
+    visit_id, company_id, company_name, property_id, property_name,
+    started_at, local_started_at, week_start_local, is_unfinished, completed_hours
+FROM fact_visits
+WHERE is_requested_week = FALSE
+ORDER BY week_start_local, local_started_at, visit_id;
+"""
+
+STAGE_8_INCIDENTS_OUTSIDE_REQUESTED_WEEKS = """
+SELECT
+    incident_id, company_id, company_name, property_id, property_name,
+    reported_at, local_reported_at, week_start_local, severity, is_high
+FROM fact_incidents
+WHERE is_requested_week = FALSE
+ORDER BY week_start_local, local_reported_at, incident_id;
+"""
+
+STAGE_8_PERIOD_EXCLUSION_SUMMARY = """
+SELECT
+    'Valid visits outside requested weeks' AS measure,
+    COUNT(*) AS value,
+    'Valid facts retained but outside this report period.' AS meaning
+FROM fact_visits
+WHERE is_requested_week = FALSE
+UNION ALL
+SELECT
+    'Valid incidents outside requested weeks',
+    COUNT(*),
+    'Valid facts retained but outside this report period.'
+FROM fact_incidents
+WHERE is_requested_week = FALSE;
+"""
+
+STAGE_8_REQUESTED_REPORT_WEEKS = """
+SELECT
+    week_start,
+    week_start + INTERVAL 6 DAY AS local_week_end,
+    'Requested local Monday week' AS meaning
+FROM src_report_weeks
+ORDER BY week_start;
+"""
+
+STAGE_8_INCIDENT_SEVERITY_SUMMARY = """
+SELECT
+    severity,
+    is_high,
+    COUNT(*) AS all_valid_incidents,
+    SUM(CASE WHEN is_requested_week THEN 1 ELSE 0 END) AS requested_report_incidents,
+    SUM(CASE WHEN NOT is_requested_week THEN 1 ELSE 0 END) AS outside_requested_incidents
+FROM fact_incidents
+GROUP BY severity, is_high
+ORDER BY
+    CASE severity
+        WHEN 'low' THEN 1
+        WHEN 'medium' THEN 2
+        WHEN 'high' THEN 3
+        ELSE 4
+    END;
+"""
+
+STAGE_8_OUTSIDE_INCIDENT_EXPLANATION = """
+SELECT
+    incident_id, property_id, property_name, property_timezone,
+    reported_at, local_reported_at, week_start_local, severity, is_high, is_requested_week
+FROM fact_incidents
+WHERE is_requested_week = FALSE
+ORDER BY local_reported_at, incident_id;
+"""
+
 
 STAGE_8_REPORT_KPIS = """
 SELECT
@@ -1138,6 +1804,49 @@ SELECT
 FROM report_builds;
 """
 
+STAGE_10_COMPANY_VISIT_DRILLDOWN = """
+WITH params AS (
+    SELECT
+        'Clover Management'::VARCHAR AS company_name,
+        TIMESTAMPTZ '2026-03-01 00:00:00+00' AS from_time,
+        TIMESTAMPTZ '2026-04-14 00:00:00+00' AS to_time
+)
+SELECT
+    f.company_name, f.visit_id, f.visitor_id,
+    f.contractor_id, f.contractor_name,
+    f.property_id, f.property_name,
+    f.started_at, f.local_started_at, f.ended_at,
+    CASE WHEN f.is_unfinished THEN 'unfinished' ELSE 'completed' END AS visit_status,
+    f.completed_hours, f.week_start_local, f.is_requested_week
+FROM fact_visits AS f
+CROSS JOIN params AS p
+WHERE f.company_name = p.company_name
+  AND f.started_at >= p.from_time
+  AND f.started_at < p.to_time
+ORDER BY f.started_at, f.visit_id;
+"""
+
+STAGE_10_CONTRACTOR_VISIT_DRILLDOWN = """
+WITH params AS (
+    SELECT
+        'Field Crew 07'::VARCHAR AS contractor_name,
+        TIMESTAMPTZ '2026-03-01 00:00:00+00' AS from_time,
+        TIMESTAMPTZ '2026-04-14 00:00:00+00' AS to_time
+)
+SELECT
+    f.contractor_name, f.visit_id, f.visitor_id,
+    f.company_id, f.company_name, f.property_id, f.property_name,
+    f.started_at, f.local_started_at, f.ended_at,
+    CASE WHEN f.is_unfinished THEN 'unfinished' ELSE 'completed' END AS visit_status,
+    f.completed_hours, f.week_start_local, f.is_requested_week
+FROM fact_visits AS f
+CROSS JOIN params AS p
+WHERE f.contractor_name = p.contractor_name
+  AND f.started_at >= p.from_time
+  AND f.started_at < p.to_time
+ORDER BY f.started_at, f.visit_id;
+"""
+
 PREVIEW_REPORT_BUILDS = """
 SELECT *
 FROM report_builds
@@ -1202,18 +1911,28 @@ QUERY_RETURNS: dict[str, str] = {
         "Returns V02's unique event history, versions, operations and applied/stale decisions.",
     "Stage 5 - E00002 duplicate delivery":
         "Returns the repeated E00002 delivery and its canonical first occurrence.",
+    "Stage 5 - discover all repeated event_id deliveries":
+        "Derives every repeated event_id from validated_visit_events and labels the first occurrence canonical and later occurrences duplicate.",
     "Stage 5 - V02 current tombstone":
         "Returns the winning V02 current state, which is the version-2 delete tombstone.",
     "Stage 5 - correction history SYN_V00256":
         "Returns both versions of SYN_V00256 and shows the correction history.",
     "Stage 5 - correction winner SYN_V00256":
         "Returns only the winning/current version of SYN_V00256.",
+    "Stage 5 - SYN_V00228 full event history":
+        "Returns the complete visit history for SYN_V00228, including E00680 and its applied/stale decisions.",
+    "Stage 5 - E00680 incoming vs existing":
+        "Returns the incoming E00680 event and the exact previously applied event it was compared with.",
+    "Stage 5 - E00680 field comparison":
+        "Returns incoming/existing state fields and boolean match checks for the equal-version consistency guard.",
     "Stage 5 - preview visit_events":
         "Returns the first 10 globally unique event-history rows.",
     "Stage 5 - preview visit_event_duplicates":
         "Returns the first 10 duplicate-delivery audit rows.",
     "Stage 5 - preview visit_current_state":
         "Returns the first 10 highest-version visit states.",
+    "Stage 5 - deleted tombstones":
+        "Returns all current delete tombstones retained to prevent stale resurrection.",
 
     "Stage 6 - V11/V12/V13 quality issues":
         "Returns the three business-quality failures and why they are excluded from reporting.",
@@ -1228,6 +1947,12 @@ QUERY_RETURNS: dict[str, str] = {
         "Returns P03's effective-dated historical company-management intervals.",
     "Stage 7 - P03 12:59/13:00 boundary":
         "Returns visit/incident records immediately before and at the P03 transfer boundary.",
+    "Stage 7 - P03 boundary interval-join proof":
+        "Returns each P03 boundary record with the effective-dated interval that matched it.",
+    "Stage 7 - property manager at timestamp":
+        "Returns the company managing an editable property at an editable exact timestamp.",
+    "Stage 7 - company properties in time range":
+        "Returns properties managed by an editable company during any overlap with an editable [from,to) time range.",
     "Stage 7 - preview property_management_intervals":
         "Returns the first 10 reconstructed historical management intervals.",
     "Stage 7 - preview current_property_management":
@@ -1237,6 +1962,30 @@ QUERY_RETURNS: dict[str, str] = {
         "Returns V14/V01 UTC time, property-local time and derived local Monday week.",
     "Stage 8 - DST elapsed duration":
         "Returns V07/V16 UTC/local times and DST-safe elapsed completed hours.",
+    "Stage 8 - historical attribution by property/time range":
+        "Returns visit/incident facts for an editable property and [from,to) UTC range, including historical company attribution.",
+    "Stage 8 - all UTC/local week shifts":
+        "Returns every visit whose UTC week differs from the correct property-local reporting week.",
+    "Stage 8 - visit status by company/property":
+        "Returns completed/unfinished visit counts and completed hours for editable company/property filters.",
+    "Stage 8 - unfinished visit details":
+        "Returns all unfinished visits; completed_hours is NULL because no end time exists.",
+    "Stage 8 - completed visit details":
+        "Returns all completed visits with their elapsed completed_hours.",
+    "Stage 8 - visits by local date range":
+        "Returns visit facts in an editable inclusive local-date range; use the same date twice for one day.",
+    "Stage 8 - incidents by local date range":
+        "Returns incident facts in an editable inclusive local-date range; use the same date twice for one day.",
+    "Stage 8 - visits outside requested weeks":
+        "Returns valid visit facts excluded only because their local week is outside the requested report period.",
+    "Stage 8 - incidents outside requested weeks":
+        "Returns valid incident facts excluded only because their local week is outside the requested report period.",
+    "Stage 8 - requested report weeks":
+        "Returns the requested local Monday week labels and their local Sunday end dates.",
+    "Stage 8 - period exclusion summary":
+        "Returns the counts of valid visit/incident facts outside the requested local weeks.",
+    "Stage 8 - incident severity summary":
+        "Returns low/medium/high incident counts and the derived high-flag rule.",
     "Stage 8 - final KPI facts":
         "Returns the six requested-period headline metrics later displayed in the HTML report.",
     "Stage 8 - preview fact_visits":
@@ -1263,6 +2012,10 @@ QUERY_RETURNS: dict[str, str] = {
 
     "Stage 10 - report build metadata":
         "Returns metadata describing the generated operations report build.",
+    "Stage 10 - company visit drilldown":
+        "Returns visit-level visitor/contractor/property/status/hour details for an editable company and UTC range.",
+    "Stage 10 - contractor visit drilldown":
+        "Returns visit-level company/property/status/hour details for an editable contractor and UTC range.",
     "Stage 10 - preview report_builds":
         "Returns up to 10 report-build metadata rows.",
 }
@@ -1318,12 +2071,17 @@ RUN: list[tuple[str, str]] = []
 # --- Stage 5: visit_events + duplicates + current state -----------------------
 # RUN.append(("Stage 5 - V02 event history", STAGE_5_V02_EVENT_HISTORY))
 # RUN.append(("Stage 5 - E00002 duplicate delivery", STAGE_5_V02_DUPLICATE))
+# RUN.append(("Stage 5 - discover all repeated event_id deliveries", STAGE_5_DUPLICATE_DISCOVERY))
 # RUN.append(("Stage 5 - V02 current tombstone", STAGE_5_V02_CURRENT_STATE))
 # RUN.append(("Stage 5 - correction history SYN_V00256", STAGE_5_CORRECTION_HISTORY))
 # RUN.append(("Stage 5 - correction winner SYN_V00256", STAGE_5_CORRECTION_WINNER))
+# RUN.append(("Stage 5 - SYN_V00228 full event history", STAGE_5_SYN_V00228_EVENT_HISTORY))
+# RUN.append(("Stage 5 - E00680 incoming vs existing", STAGE_5_E00680_INCOMING_VS_EXISTING))
+# RUN.append(("Stage 5 - E00680 field comparison", STAGE_5_E00680_FIELD_COMPARISON))
 # RUN.append(("Stage 5 - preview visit_events", PREVIEW_VISIT_EVENTS))
 # RUN.append(("Stage 5 - preview visit_event_duplicates", PREVIEW_VISIT_EVENT_DUPLICATES))
 # RUN.append(("Stage 5 - preview visit_current_state", PREVIEW_VISIT_CURRENT_STATE_STAGE5))
+# RUN.append(("Stage 5 - deleted tombstones", STAGE_5_DELETED_TOMBSTONES))
 
 # --- Stage 6: quality issues + reportable-current view ------------------------
 # RUN.append(("Stage 6 - V11/V12/V13 quality issues", STAGE_6_QUALITY_ISSUES))
@@ -1334,12 +2092,29 @@ RUN: list[tuple[str, str]] = []
 # --- Stage 7: historical + current property management ------------------------
 # RUN.append(("Stage 7 - P03 management intervals", STAGE_7_P03_INTERVALS))
 # RUN.append(("Stage 7 - P03 12:59/13:00 boundary", STAGE_7_P03_BOUNDARY))
+# RUN.append(("Stage 7 - P03 boundary interval-join proof", STAGE_7_P03_BOUNDARY_JOIN_PROOF))
+# RUN.append(("Stage 7 - property management exact/range lookup", STAGE_7_PROPERTY_AT_TIMESTAMP))
+# RUN.append(("Stage 7 - company properties in time range", STAGE_7_COMPANY_PROPERTIES_IN_RANGE))
 # RUN.append(("Stage 7 - preview property_management_intervals", PREVIEW_PROPERTY_MANAGEMENT_INTERVALS))
 # RUN.append(("Stage 7 - preview current_property_management", PREVIEW_CURRENT_PROPERTY_MANAGEMENT))
 
 # --- Stage 8: visit + incident analytical facts -------------------------------
 # RUN.append(("Stage 8 - local week boundary", STAGE_8_LOCAL_WEEK_BOUNDARY))
 # RUN.append(("Stage 8 - DST elapsed duration", STAGE_8_DST_DURATION))
+# RUN.append(("Stage 8 - historical attribution by property/time range", STAGE_8_HISTORICAL_ATTRIBUTION_BY_PROPERTY_RANGE))
+# RUN.append(("Stage 8 - all UTC/local week shifts", STAGE_8_ALL_LOCAL_WEEK_SHIFTS))
+# RUN.append(("Stage 8 - visits by historical company/time range", STAGE_8_VISITS_BY_HISTORICAL_COMPANY_RANGE))
+# RUN.append(("Stage 8 - visits by contractor/time range", STAGE_8_VISITS_BY_CONTRACTOR_RANGE))
+# RUN.append(("Stage 8 - visit status by company/property", STAGE_8_VISIT_STATUS_BY_COMPANY_PROPERTY))
+# RUN.append(("Stage 8 - unfinished visit details", STAGE_8_UNFINISHED_VISITS))
+# RUN.append(("Stage 8 - completed visit details", STAGE_8_COMPLETED_VISITS))
+# RUN.append(("Stage 8 - visits by local date range", STAGE_8_VISITS_BY_LOCAL_DATE_RANGE))
+# RUN.append(("Stage 8 - incidents by local date range", STAGE_8_INCIDENTS_BY_LOCAL_DATE_RANGE))
+# RUN.append(("Stage 8 - visits outside requested weeks", STAGE_8_VISITS_OUTSIDE_REQUESTED_WEEKS))
+# RUN.append(("Stage 8 - incidents outside requested weeks", STAGE_8_INCIDENTS_OUTSIDE_REQUESTED_WEEKS))
+# RUN.append(("Stage 8 - requested report weeks", STAGE_8_REQUESTED_REPORT_WEEKS))
+# RUN.append(("Stage 8 - period exclusion summary", STAGE_8_PERIOD_EXCLUSION_SUMMARY))
+# RUN.append(("Stage 8 - incident severity summary", STAGE_8_INCIDENT_SEVERITY_SUMMARY))
 # RUN.append(("Stage 8 - final KPI facts", STAGE_8_REPORT_KPIS))
 # RUN.append(("Stage 8 - preview fact_visits", PREVIEW_FACT_VISITS_STAGE8))
 # RUN.append(("Stage 8 - preview fact_incidents", PREVIEW_FACT_INCIDENTS))
@@ -1356,6 +2131,8 @@ RUN: list[tuple[str, str]] = []
 
 # --- Stage 10: report build metadata ------------------------------------------
 # RUN.append(("Stage 10 - report build metadata", STAGE_10_REPORT_BUILD))
+# RUN.append(("Stage 10 - company visit drilldown", STAGE_10_COMPANY_VISIT_DRILLDOWN))
+# RUN.append(("Stage 10 - contractor visit drilldown", STAGE_10_CONTRACTOR_VISIT_DRILLDOWN))
 # RUN.append(("Stage 10 - preview report_builds", PREVIEW_REPORT_BUILDS))
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -41,6 +42,45 @@ def _write_csv(path: Path, rows: list[dict[str, object]]) -> None:
         writer = csv.DictWriter(file, fieldnames=list(rows[0].keys()))
         writer.writeheader()
         writer.writerows(rows)
+
+
+def _write_html_report(path: Path, html: str) -> None:
+    """Write the HTML report safely, including on Windows.
+
+    The report may already exist and may be open in a browser during an
+    interview/demo. Writing to a temporary file first avoids truncating the
+    existing report if the new write fails and also avoids the Windows
+    ``OSError: [Errno 22] Invalid argument`` seen with a direct Path.write_text
+    replacement on some local setups.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    temporary_path = path.with_name(f".{path.name}.tmp")
+    temporary_path.write_text(html, encoding="utf-8")
+
+    try:
+        os.replace(temporary_path, path)
+    except OSError as exc:
+        # A stale/problematic existing destination can occasionally make a
+        # direct Windows replacement fail. If possible, remove that destination
+        # and replace it with the fully-written temporary report.
+        try:
+            if path.exists() and path.is_file():
+                path.unlink()
+            os.replace(temporary_path, path)
+        except OSError as replacement_exc:
+            raise RuntimeError(
+                "Could not write reports/operations_report.html. "
+                "Close any application that may have locked the file, confirm "
+                "that reports/operations_report.html is a normal file (not a "
+                "folder), then rerun Stage 10."
+            ) from replacement_exc
+    finally:
+        if temporary_path.exists():
+            try:
+                temporary_path.unlink()
+            except OSError:
+                pass
 
 
 def _line_chart(
@@ -441,7 +481,7 @@ def generate_operations_report(
             limitations=limitations,
         )
 
-        report_path.write_text(html, encoding="utf-8")
+        _write_html_report(report_path, html)
 
         extract_data = {
             "company_week.csv": company_week,

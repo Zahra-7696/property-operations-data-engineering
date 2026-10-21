@@ -9,7 +9,7 @@ from typing import Iterable
 
 import duckdb
 
-from src.database import PROJECT_ROOT
+from src.database import PROJECT_ROOT, connect_database
 from src.verify_sources import count_rows, sha256_file
 
 
@@ -220,7 +220,12 @@ def fetch_technical_rejects(
 def format_reject_summary_table(
     rejects: list[dict[str, object]],
 ) -> str:
-    """Compact table suitable for both console output and Report.txt."""
+    """Complete reject table used by both console output and Report.txt.
+
+    Keep the original human-facing columns first for readability/test stability,
+    then append machine-readable reason codes, the exact source reference and
+    the exact raw source record on the same evidence row.
+    """
     rows = [
         (
             index,
@@ -229,14 +234,48 @@ def format_reject_summary_table(
             reject["event_id"],
             reject["category"],
             reject["short_reason"],
+            reject["reason_codes"],
+            reject["source_ref"],
+            reject["raw_payload"],
         )
         for index, reject in enumerate(rejects, start=1)
     ]
 
     return format_text_table(
-        headers=["#", "Batch", "Line", "Event ID", "Category", "Reason"],
+        headers=[
+            "#",
+            "Batch",
+            "Line",
+            "Event ID",
+            "Category",
+            "Reason",
+            "Reason codes",
+            "Source reference",
+            "Raw source record",
+        ],
         rows=rows,
-        widths=[2, 8, 5, 12, 18, 48],
+        widths=[2, 8, 5, 12, 18, 48, 34, 39, 72],
+    )
+
+
+def format_reject_source_reference_index(
+    rejects: list[dict[str, object]],
+) -> str:
+    """Small source-reference index retained for stable audit navigation.
+
+    The full reject evidence is already merged into the main table above. This
+    compact index intentionally contains only row number + source reference, so
+    it does not duplicate reason/raw-payload evidence.
+    """
+    rows = [
+        (index, reject["source_ref"])
+        for index, reject in enumerate(rejects, start=1)
+    ]
+
+    return format_text_table(
+        headers=["#", "Source reference"],
+        rows=rows,
+        widths=[2, 39],
     )
 
 
@@ -474,15 +513,19 @@ def _stage_4_lines(
         "Reject-category summary:",
         category_table,
         "",
-        "Rejected-record summary:",
+        "Rejected-record evidence:",
+        (
+            "Each row combines the human-readable category/reason, machine-readable "
+            "reason codes, exact source reference and exact raw source record."
+        ),
         format_reject_summary_table(rejects),
         "",
-        "Detailed source evidence:",
+        "Source-reference index:",
         (
-            "Reference format is <source_file>:<line_number>. "
-            "The raw source files remain unchanged."
+            "Compact navigation index for the same rejected rows; full evidence is "
+            "already merged into the table above."
         ),
-        format_reject_evidence_table(rejects),
+        format_reject_source_reference_index(rejects),
         "",
         "Validation replay behavior: already-validated batches are a no-op.",
         (
@@ -575,6 +618,15 @@ def fetch_duplicate_deliveries(
 def fetch_stale_events(
     connection: duckdb.DuckDBPyConnection,
 ) -> list[dict[str, object]]:
+    """
+    Return every stale/equal-version event together with the exact applied event
+    that represented visit_current_state immediately before the incoming event.
+
+    "Incoming" means the event currently being processed in manifest/line order.
+    "Existing" means the latest earlier event for the same visit whose state_action
+    was applied. source_version, not updated_at, decides whether the incoming event
+    replaces that existing state.
+    """
     rows = connection.execute(
         """
         SELECT
@@ -585,6 +637,7 @@ def fetch_stale_events(
             e.operation,
             e.first_batch_id,
             b.source_file,
+            b.manifest_order,
             e.first_line_number
         FROM visit_events AS e
         JOIN ingestion_batches AS b
@@ -606,8 +659,58 @@ def fetch_stale_events(
         operation,
         batch_id,
         source_file,
+        manifest_order,
         line_number,
     ) in rows:
+        existing = connection.execute(
+            """
+            SELECT
+                p.event_id,
+                p.source_version,
+                p.operation,
+                pb.source_file,
+                p.first_line_number
+            FROM visit_events AS p
+            JOIN ingestion_batches AS pb
+                ON pb.batch_id = p.first_batch_id
+            WHERE p.visit_id = ?
+              AND p.state_action = 'applied'
+              AND (
+                    pb.manifest_order < ?
+                    OR (
+                        pb.manifest_order = ?
+                        AND p.first_line_number < ?
+                    )
+              )
+            ORDER BY
+                pb.manifest_order DESC,
+                p.first_line_number DESC
+            LIMIT 1
+            """,
+            [visit_id, manifest_order, manifest_order, line_number],
+        ).fetchone()
+
+        if existing is None:
+            raise RuntimeError(
+                f"No earlier applied state found for stale event {event_id!r} "
+                f"on visit {visit_id!r}."
+            )
+
+        (
+            existing_event_id,
+            existing_version,
+            existing_operation,
+            existing_source_file,
+            existing_line_number,
+        ) = existing
+
+        if int(existing_version) != int(prior_source_version):
+            raise RuntimeError(
+                "Stage 5 audit reconstruction disagrees with prior_source_version: "
+                f"event={event_id!r}, stored_prior={prior_source_version}, "
+                f"reconstructed_existing={existing_version}."
+            )
+
         comparison = (
             "lower source_version"
             if source_version < prior_source_version
@@ -623,6 +726,11 @@ def fetch_stale_events(
                 "operation": operation,
                 "batch_id": batch_id,
                 "source_ref": f"{source_file}:{line_number}",
+                "existing_event_id": existing_event_id,
+                "existing_operation": existing_operation,
+                "existing_source_ref": (
+                    f"{existing_source_file}:{existing_line_number}"
+                ),
                 "reason": (
                     f"{comparison}: incoming version does not exceed "
                     "the current visit version."
@@ -631,7 +739,6 @@ def fetch_stale_events(
         )
 
     return result
-
 
 def format_duplicate_delivery_table(
     duplicates: list[dict[str, object]],
@@ -661,20 +768,14 @@ def format_duplicate_delivery_table(
 def format_stale_event_table(
     stale_events: list[dict[str, object]],
 ) -> str:
-    return format_text_table(
-        headers=[
-            "#",
-            "Visit",
-            "Event ID",
-            "Incoming",
-            "Existing",
-            "Op",
-            "Source reference",
-            "Reason",
-        ],
-        rows=[
+    """Render each stale decision as an incoming/existing comparison pair."""
+    rows: list[tuple[object, ...]] = []
+
+    for index, item in enumerate(stale_events, start=1):
+        rows.append(
             (
                 index,
+                "incoming",
                 item["visit_id"],
                 item["event_id"],
                 item["incoming_version"],
@@ -683,11 +784,36 @@ def format_stale_event_table(
                 item["source_ref"],
                 item["reason"],
             )
-            for index, item in enumerate(stale_events, start=1)
-        ],
-        widths=[3, 8, 12, 8, 8, 7, 41, 50],
-    )
+        )
+        rows.append(
+            (
+                "",
+                "existing",
+                item["visit_id"],
+                item["existing_event_id"],
+                "",
+                item["existing_version"],
+                item["existing_operation"],
+                item["existing_source_ref"],
+                "Current applied state immediately before the incoming event.",
+            )
+        )
 
+    return format_text_table(
+        headers=[
+            "#",
+            "Role",
+            "Visit ID",
+            "Event ID",
+            "Incoming",
+            "Existing",
+            "Op",
+            "Source reference",
+            "Reason / comparison",
+        ],
+        rows=rows,
+        widths=[3, 8, 14, 12, 8, 8, 7, 41, 52],
+    )
 
 def _stage_5_lines(
     connection: duckdb.DuckDBPyConnection,
@@ -874,6 +1000,19 @@ def _stage_5_lines(
         f"  Active current visit states           : {active_states}",
         f"  Deleted current visit states          : {deleted_states}",
         "",
+        "State-retention summary:",
+        format_text_table(
+            headers=["Measure", "Count", "Meaning"],
+            rows=[
+                (
+                    "Deleted visit tombstones",
+                    deleted_states,
+                    "Latest delete states retained to prevent stale resurrection.",
+                )
+            ],
+            widths=[34, 8, 64],
+        ),
+        "",
         "Key version/delete/reactivation examples:",
         key_visit_table,
         "",
@@ -881,6 +1020,7 @@ def _stage_5_lines(
         format_duplicate_delivery_table(duplicates),
         "",
         "Stale/equal-version evidence:",
+        "  Incoming event versus the existing applied state at that moment:",
         format_stale_event_table(stale_events),
         "",
         "Deleted current-state tombstones:",
@@ -1086,18 +1226,12 @@ def _stage_7_lines(
     source_observations = connection.execute(
         "SELECT COUNT(*) FROM src_property_management"
     ).fetchone()[0]
-
     intervals = connection.execute(
         "SELECT COUNT(*) FROM property_management_intervals"
     ).fetchone()[0]
-
     properties = connection.execute(
-        """
-        SELECT COUNT(DISTINCT property_id)
-        FROM property_management_intervals
-        """
+        "SELECT COUNT(DISTINCT property_id) FROM property_management_intervals"
     ).fetchone()[0]
-
     current_rows = connection.execute(
         "SELECT COUNT(*) FROM current_property_management"
     ).fetchone()[0]
@@ -1114,22 +1248,15 @@ def _stage_7_lines(
             i.start_observation_id,
             i.source_observation_count
         FROM property_management_intervals AS i
-        JOIN src_properties AS p
-            ON p.property_id = i.property_id
-        JOIN src_companies AS c
-            ON c.company_id = i.company_id
+        JOIN src_properties AS p ON p.property_id = i.property_id
+        JOIN src_companies AS c ON c.company_id = i.company_id
         ORDER BY i.property_id, i.valid_from
         """
     ).fetchall()
 
     current = connection.execute(
         """
-        SELECT
-            property_id,
-            property_name,
-            company_id,
-            company_name,
-            managed_from
+        SELECT property_id, property_name, company_id, company_name, managed_from
         FROM current_property_management
         ORDER BY property_id
         """
@@ -1137,11 +1264,7 @@ def _stage_7_lines(
 
     p01 = connection.execute(
         """
-        SELECT
-            company_id,
-            valid_from,
-            valid_to,
-            source_observation_count
+        SELECT company_id, valid_from, valid_to, source_observation_count
         FROM property_management_intervals
         WHERE property_id = 'P01'
         ORDER BY valid_from
@@ -1162,10 +1285,10 @@ def _stage_7_lines(
             UNION ALL
 
             SELECT
-                'incident' AS record_type,
-                incident_id AS record_id,
+                'incident',
+                incident_id,
                 property_id,
-                reported_at AS business_time
+                reported_at
             FROM src_incidents
             WHERE incident_id IN ('I06', 'I07')
         )
@@ -1174,9 +1297,11 @@ def _stage_7_lines(
             e.record_id,
             e.property_id,
             e.business_time,
-            i.company_id
+            i.company_id,
+            i.valid_from,
+            i.valid_to
         FROM supplied_events AS e
-        LEFT JOIN property_management_intervals AS i
+        JOIN property_management_intervals AS i
             ON i.property_id = e.property_id
            AND e.business_time >= i.valid_from
            AND (i.valid_to IS NULL OR e.business_time < i.valid_to)
@@ -1202,35 +1327,18 @@ def _stage_7_lines(
         "All reconstructed management intervals:",
         format_text_table(
             headers=[
-                "Property",
-                "Property name",
-                "Company",
-                "Company name",
-                "Valid from UTC",
-                "Valid to UTC",
-                "Start obs",
-                "Obs count",
+                "Property", "Property name", "Company", "Company name",
+                "Valid from UTC", "Valid to UTC", "Start obs", "Obs count",
             ],
             rows=[
                 (
-                    property_id,
-                    property_name,
-                    company_id,
-                    company_name,
-                    _format_utc(valid_from),
-                    _format_utc(valid_to),
-                    start_observation_id,
-                    observation_count,
+                    property_id, property_name, company_id, company_name,
+                    _format_utc(valid_from), _format_utc(valid_to),
+                    start_observation_id, observation_count,
                 )
                 for (
-                    property_id,
-                    property_name,
-                    company_id,
-                    company_name,
-                    valid_from,
-                    valid_to,
-                    start_observation_id,
-                    observation_count,
+                    property_id, property_name, company_id, company_name,
+                    valid_from, valid_to, start_observation_id, observation_count,
                 ) in histories
             ],
             widths=[9, 23, 8, 25, 20, 20, 11, 9],
@@ -1240,79 +1348,50 @@ def _stage_7_lines(
         format_text_table(
             headers=["Company", "Valid from UTC", "Valid to UTC", "Obs count"],
             rows=[
-                (
-                    company_id,
-                    _format_utc(valid_from),
-                    _format_utc(valid_to),
-                    observation_count,
-                )
-                for (
-                    company_id,
-                    valid_from,
-                    valid_to,
-                    observation_count,
-                ) in p01
+                (company_id, _format_utc(valid_from), _format_utc(valid_to), observation_count)
+                for company_id, valid_from, valid_to, observation_count in p01
             ],
             widths=[10, 22, 22, 10],
         ),
         "",
         "P03 transfer-boundary attribution proof:",
+        "  Direct interval-join evidence using [valid_from, valid_to) semantics:",
         format_text_table(
-            headers=["Type", "Record", "Property", "Business time UTC", "Company"],
+            headers=[
+                "Type", "Record", "Property", "Business time UTC", "Company",
+                "Interval from", "Interval to",
+            ],
             rows=[
                 (
-                    record_type,
-                    record_id,
-                    property_id,
-                    _format_utc(business_time),
-                    company_id,
+                    record_type, record_id, property_id, _format_utc(business_time),
+                    company_id, _format_utc(valid_from), _format_utc(valid_to),
                 )
                 for (
-                    record_type,
-                    record_id,
-                    property_id,
-                    business_time,
-                    company_id,
+                    record_type, record_id, property_id, business_time,
+                    company_id, valid_from, valid_to,
                 ) in boundary_records
             ],
-            widths=[10, 10, 10, 22, 10],
+            widths=[10, 10, 10, 22, 10, 22, 22],
         ),
         "",
         "Current-management lookup:",
         format_text_table(
-            headers=[
-                "Property",
-                "Property name",
-                "Company",
-                "Company name",
-                "Managed from UTC",
-            ],
+            headers=["Property", "Property name", "Company", "Company name", "Managed from UTC"],
             rows=[
-                (
-                    property_id,
-                    property_name,
-                    company_id,
-                    company_name,
-                    _format_utc(managed_from),
-                )
-                for (
-                    property_id,
-                    property_name,
-                    company_id,
-                    company_name,
-                    managed_from,
-                ) in current
+                (property_id, property_name, company_id, company_name, _format_utc(managed_from))
+                for property_id, property_name, company_id, company_name, managed_from in current
             ],
             widths=[9, 23, 8, 25, 22],
         ),
         "",
         (
-            "Interval rule: [valid_from, valid_to). A record exactly at the "
-            "transfer timestamp belongs to the new company."
+            "Interval rule: [valid_from, valid_to). C02 can have valid_to = "
+            "2026-03-29T13:00:00Z and still own 12:59; the end timestamp itself is "
+            "excluded, so a record exactly at 13:00 belongs to the new C03 interval."
         ),
         (
-            "Consecutive unchanged observations collapse into one interval; "
-            "a later return to a previous company creates a new interval."
+            "Consecutive unchanged observations collapse into one interval; a later "
+            "return to a previous company creates a new interval."
         ),
     ]
 
@@ -1331,37 +1410,25 @@ def _has_stage8_results(
 def _stage_8_lines(
     connection: duckdb.DuckDBPyConnection,
 ) -> list[str]:
-    visit_total = connection.execute(
-        "SELECT COUNT(*) FROM fact_visits"
-    ).fetchone()[0]
-
-    incident_total = connection.execute(
-        "SELECT COUNT(*) FROM fact_incidents"
-    ).fetchone()[0]
+    visit_total = connection.execute("SELECT COUNT(*) FROM fact_visits").fetchone()[0]
+    incident_total = connection.execute("SELECT COUNT(*) FROM fact_incidents").fetchone()[0]
 
     requested = connection.execute(
         """
         SELECT
-            COUNT(*) AS visit_count,
-            COUNT(DISTINCT visitor_id) AS distinct_visitors,
-            ROUND(COALESCE(SUM(completed_hours), 0), 2) AS completed_hours,
-            COALESCE(
-                SUM(CASE WHEN is_unfinished THEN 1 ELSE 0 END),
-                0
-            ) AS unfinished_visits
+            COUNT(*),
+            COUNT(DISTINCT visitor_id),
+            ROUND(COALESCE(SUM(completed_hours), 0), 2),
+            COALESCE(SUM(CASE WHEN is_unfinished THEN 1 ELSE 0 END), 0)
         FROM fact_visits
         WHERE is_requested_week = TRUE
         """
     ).fetchone()
-
     requested_incidents = connection.execute(
         """
         SELECT
-            COUNT(*) AS incident_count,
-            COALESCE(
-                SUM(CASE WHEN is_high THEN 1 ELSE 0 END),
-                0
-            ) AS high_incidents
+            COUNT(*),
+            COALESCE(SUM(CASE WHEN is_high THEN 1 ELSE 0 END), 0)
         FROM fact_incidents
         WHERE is_requested_week = TRUE
         """
@@ -1370,6 +1437,7 @@ def _stage_8_lines(
     requested_visit_count = requested[0]
     requested_incident_count = requested_incidents[0]
 
+    # Different property from Stage 7: P11 changes C03 -> C01 at 2026-03-23 00:00Z.
     history_examples = connection.execute(
         """
         SELECT
@@ -1377,20 +1445,22 @@ def _stage_8_lines(
             visit_id AS record_id,
             property_id,
             started_at AS business_time,
-            company_id
+            company_id,
+            company_name
         FROM fact_visits
-        WHERE visit_id IN ('V09', 'V10')
+        WHERE visit_id IN ('SYN_V00373', 'SYN_V01461')
 
         UNION ALL
 
         SELECT
-            'incident' AS record_type,
-            incident_id AS record_id,
+            'incident',
+            incident_id,
             property_id,
-            reported_at AS business_time,
-            company_id
+            reported_at,
+            company_id,
+            company_name
         FROM fact_incidents
-        WHERE incident_id IN ('I06', 'I07')
+        WHERE incident_id = 'SYN_I0153'
 
         ORDER BY business_time, record_type, record_id
         """
@@ -1398,32 +1468,120 @@ def _stage_8_lines(
 
     week_examples = connection.execute(
         """
-        SELECT
-            visit_id,
-            property_id,
-            property_timezone,
-            started_at,
-            local_started_at,
-            week_start_local
+        SELECT visit_id, property_id, property_timezone, started_at,
+               local_started_at, week_start_local
         FROM fact_visits
         WHERE visit_id IN ('V14', 'V01')
         ORDER BY started_at
         """
     ).fetchall()
 
+    all_week_shifts = connection.execute(
+        """
+        SELECT
+            visit_id, property_id, property_name, property_timezone,
+            started_at, local_started_at,
+            CAST(DATE_TRUNC('week', started_at AT TIME ZONE 'UTC') AS DATE) AS utc_week_start,
+            week_start_local
+        FROM fact_visits
+        WHERE CAST(DATE_TRUNC('week', started_at AT TIME ZONE 'UTC') AS DATE)
+              <> week_start_local
+        ORDER BY started_at, visit_id
+        """
+    ).fetchall()
+
     dst_examples = connection.execute(
         """
         SELECT
-            visit_id,
-            property_timezone,
-            started_at,
-            ended_at,
-            local_started_at,
-            local_ended_at,
-            completed_hours
+            visit_id, company_id, company_name, property_id, property_name,
+            property_timezone, started_at, ended_at,
+            local_started_at, local_ended_at, is_unfinished, completed_hours
         FROM fact_visits
         WHERE visit_id IN ('V07', 'V16')
         ORDER BY visit_id
+        """
+    ).fetchall()
+
+    completion_summary = connection.execute(
+        """
+        SELECT
+            company_id, company_name, property_id, property_name,
+            COUNT(*) AS visit_count,
+            SUM(CASE WHEN is_unfinished THEN 1 ELSE 0 END) AS unfinished_visits,
+            SUM(CASE WHEN NOT is_unfinished THEN 1 ELSE 0 END) AS completed_visits,
+            ROUND(SUM(COALESCE(completed_hours, 0)), 2) AS completed_hours
+        FROM fact_visits
+        GROUP BY company_id, company_name, property_id, property_name
+        ORDER BY company_id, property_id
+        """
+    ).fetchall()
+
+    unfinished_details = connection.execute(
+        """
+        SELECT
+            visit_id, company_id, property_id, started_at, local_started_at,
+            week_start_local, is_requested_week
+        FROM fact_visits
+        WHERE is_unfinished = TRUE
+        ORDER BY company_id, property_id, started_at, visit_id
+        """
+    ).fetchall()
+
+    outside_visits = connection.execute(
+        """
+        SELECT
+            visit_id, company_id, property_id, local_started_at,
+            week_start_local, is_unfinished, completed_hours
+        FROM fact_visits
+        WHERE is_requested_week = FALSE
+        ORDER BY week_start_local, local_started_at, visit_id
+        """
+    ).fetchall()
+
+    outside_incidents = connection.execute(
+        """
+        SELECT
+            incident_id, company_id, property_id, property_timezone,
+            reported_at, local_reported_at, week_start_local, severity, is_high
+        FROM fact_incidents
+        WHERE is_requested_week = FALSE
+        ORDER BY week_start_local, local_reported_at, incident_id
+        """
+    ).fetchall()
+
+    sample_visits = connection.execute(
+        """
+        SELECT visit_id, company_id, property_id, local_started_at,
+               is_unfinished, completed_hours
+        FROM fact_visits
+        WHERE CAST(local_started_at AS DATE) = DATE '2026-03-23'
+        ORDER BY local_started_at, visit_id
+        """
+    ).fetchall()
+
+    sample_incidents = connection.execute(
+        """
+        SELECT incident_id, company_id, property_id, local_reported_at, severity
+        FROM fact_incidents
+        WHERE CAST(local_reported_at AS DATE) = DATE '2026-03-23'
+        ORDER BY local_reported_at, incident_id
+        """
+    ).fetchall()
+
+    requested_weeks = connection.execute(
+        """
+        SELECT week_start, week_start + INTERVAL 6 DAY
+        FROM src_report_weeks
+        ORDER BY week_start
+        """
+    ).fetchall()
+
+    severity_summary = connection.execute(
+        """
+        SELECT severity, COUNT(*), SUM(CASE WHEN is_high THEN 1 ELSE 0 END)
+        FROM fact_incidents
+        GROUP BY severity
+        ORDER BY CASE severity WHEN 'low' THEN 1 WHEN 'medium' THEN 2 WHEN 'high' THEN 3 ELSE 4 END
         """
     ).fetchall()
 
@@ -1431,9 +1589,9 @@ def _stage_8_lines(
         "STAGE 8 - ANALYTICAL VISIT AND INCIDENT FACTS",
         _separator("-"),
         (
-            "Purpose: create one reportable-visit fact row per visit and one "
-            "incident fact row per incident with historical company and "
-            "property-local reporting week attribution."
+            "Purpose: create one reportable-visit fact row per visit and one incident "
+            "fact row per incident with historical company, property-local reporting "
+            "week and DST-safe elapsed-duration attribution."
         ),
         "",
         "Fact counts:",
@@ -1444,6 +1602,55 @@ def _stage_8_lines(
         f"  Visits outside requested weeks              : {visit_total - requested_visit_count}",
         f"  Incidents outside requested weeks           : {incident_total - requested_incident_count}",
         "",
+        "Requested-period exclusion summary:",
+        format_text_table(
+            headers=["Measure", "Count", "Meaning"],
+            rows=[
+                (
+                    "Valid visits outside requested weeks",
+                    visit_total - requested_visit_count,
+                    "Valid facts retained but outside this report period.",
+                ),
+                (
+                    "Valid incidents outside requested weeks",
+                    incident_total - requested_incident_count,
+                    "Valid facts retained but outside this report period.",
+                ),
+            ],
+            widths=[43, 8, 61],
+        ),
+        "",
+        "Requested local report weeks (from src_report_weeks):",
+        format_text_table(
+            headers=["Local week start", "Local week end", "Meaning"],
+            rows=[
+                (week_start, week_end, "Requested local Monday week")
+                for week_start, week_end in requested_weeks
+            ],
+            widths=[18, 20, 60],
+        ),
+        (
+            "A fact is in-period only when its derived property-local Monday "
+            "week_start_local exists in src_report_weeks."
+        ),
+        "",
+        "Incident severity / high-flag rule:",
+        format_text_table(
+            headers=["Severity", "Incidents", "High-flag rows", "Rule"],
+            rows=[
+                (
+                    severity, count, high_count,
+                    "is_high = TRUE" if severity == "high" else "is_high = FALSE",
+                )
+                for severity, count, high_count in severity_summary
+            ],
+            widths=[12, 10, 15, 28],
+        ),
+        (
+            "Severity is source-provided as low, medium or high. is_high is a "
+            "derived boolean that is true exactly when severity='high'."
+        ),
+        "",
         "Requested-week metric checks:",
         f"  Visit count             : {requested[0]}",
         f"  Distinct visitors       : {requested[1]}",
@@ -1452,104 +1659,133 @@ def _stage_8_lines(
         f"  Incident count          : {requested_incidents[0]}",
         f"  High-severity incidents : {requested_incidents[1]}",
         "",
-        "Historical company attribution proof:",
+        "P11 historical company attribution proof (different from Stage 7 P03 example):",
         format_text_table(
-            headers=["Type", "Record", "Property", "Business time UTC", "Company"],
+            headers=["Type", "Record", "Property", "Business time UTC", "Company", "Company name"],
             rows=[
-                (
-                    record_type,
-                    record_id,
-                    property_id,
-                    _format_utc(business_time),
-                    company_id,
-                )
-                for (
-                    record_type,
-                    record_id,
-                    property_id,
-                    business_time,
-                    company_id,
-                ) in history_examples
+                (record_type, record_id, property_id, _format_utc(business_time), company_id, company_name)
+                for record_type, record_id, property_id, business_time, company_id, company_name in history_examples
             ],
-            widths=[10, 10, 10, 22, 10],
+            widths=[10, 14, 10, 22, 10, 24],
         ),
         "",
-        "Property-local week-boundary proof:",
+        "P01 property-local week-boundary proof:",
         format_text_table(
-            headers=[
-                "Visit",
-                "Property",
-                "Timezone",
-                "Started UTC",
-                "Local start",
-                "Local week",
-            ],
+            headers=["Visit", "Property", "Timezone", "Started UTC", "Local start", "Local week"],
             rows=[
-                (
-                    visit_id,
-                    property_id,
-                    property_timezone,
-                    _format_utc(started_at),
-                    _format_local(local_started_at),
-                    week_start_local,
-                )
-                for (
-                    visit_id,
-                    property_id,
-                    property_timezone,
-                    started_at,
-                    local_started_at,
-                    week_start_local,
-                ) in week_examples
+                (visit_id, property_id, timezone, _format_utc(started_at), _format_local(local_started_at), week_start)
+                for visit_id, property_id, timezone, started_at, local_started_at, week_start in week_examples
             ],
             widths=[8, 10, 20, 22, 20, 12],
         ),
         "",
-        "DST / elapsed-hours proof:",
+        "All visit facts whose UTC-week label differs from the property-local week:",
         format_text_table(
-            headers=[
-                "Visit",
-                "Timezone",
-                "Start UTC",
-                "End UTC",
-                "Local start",
-                "Local end",
-                "Hours",
+            headers=["Visit", "Property", "Property name", "Timezone", "Started UTC", "Local start", "UTC week", "Local week"],
+            rows=[
+                (visit_id, property_id, property_name, timezone, _format_utc(started_at), _format_local(local_started_at), utc_week, local_week)
+                for visit_id, property_id, property_name, timezone, started_at, local_started_at, utc_week, local_week in all_week_shifts
             ],
+            widths=[13, 9, 22, 20, 22, 20, 12, 12],
+        ),
+        "",
+        "DST-safe elapsed-duration proof with company/property context:",
+        format_text_table(
+            headers=["Visit", "Company", "Property", "Timezone", "Start UTC", "End UTC", "Local start", "Local end", "Unfinished", "Hours"],
             rows=[
                 (
-                    visit_id,
-                    property_timezone,
-                    _format_utc(started_at),
-                    _format_utc(ended_at),
-                    _format_local(local_started_at),
-                    _format_local(local_ended_at),
-                    f"{completed_hours:.2f}",
+                    visit_id, company_id, property_id, timezone,
+                    _format_utc(started_at), _format_utc(ended_at),
+                    _format_local(local_started_at), _format_local(local_ended_at),
+                    str(is_unfinished), "N/A" if completed_hours is None else f"{completed_hours:.2f}",
                 )
-                for (
-                    visit_id,
-                    property_timezone,
-                    started_at,
-                    ended_at,
-                    local_started_at,
-                    local_ended_at,
-                    completed_hours,
-                ) in dst_examples
+                for visit_id, company_id, _company_name, property_id, _property_name, timezone,
+                    started_at, ended_at, local_started_at, local_ended_at,
+                    is_unfinished, completed_hours in dst_examples
             ],
-            widths=[8, 20, 22, 22, 20, 20, 8],
+            widths=[8, 8, 9, 20, 22, 22, 20, 20, 10, 8],
+        ),
+        "",
+        "Visit completion summary by historical company and property:",
+        format_text_table(
+            headers=["Company", "Company name", "Property", "Property name", "Visits", "Completed", "Unfinished", "Completed hours"],
+            rows=[
+                (company_id, company_name, property_id, property_name, visit_count, completed_visits, unfinished_visits, f"{completed_hours:.2f}")
+                for company_id, company_name, property_id, property_name, visit_count, unfinished_visits, completed_visits, completed_hours in completion_summary
+            ],
+            widths=[8, 24, 9, 22, 8, 10, 10, 15],
+        ),
+        "",
+        "Unfinished visit details (duration is unknown because ended_at is NULL):",
+        format_text_table(
+            headers=["Visit", "Company", "Property", "Started UTC", "Local start", "Local week", "Requested"],
+            rows=[
+                (visit_id, company_id, property_id, _format_utc(started_at), _format_local(local_started_at), week_start, str(is_requested))
+                for visit_id, company_id, property_id, started_at, local_started_at, week_start, is_requested in unfinished_details
+            ],
+            widths=[13, 8, 9, 22, 20, 12, 10],
+        ),
+        "",
+        "Sample local-date filter: visit facts on 2026-03-23:",
+        format_text_table(
+            headers=["Visit", "Company", "Property", "Local start", "Unfinished", "Hours"],
+            rows=[
+                (visit_id, company_id, property_id, _format_local(local_start), str(is_unfinished), "N/A" if hours is None else f"{hours:.2f}")
+                for visit_id, company_id, property_id, local_start, is_unfinished, hours in sample_visits
+            ],
+            widths=[13, 8, 9, 20, 10, 8],
+        ),
+        "",
+        "Sample local-date filter: incident facts on 2026-03-23:",
+        format_text_table(
+            headers=["Incident", "Company", "Property", "Local reported", "Severity"],
+            rows=[
+                (incident_id, company_id, property_id, _format_local(local_reported), severity)
+                for incident_id, company_id, property_id, local_reported, severity in sample_incidents
+            ],
+            widths=[13, 8, 9, 20, 10],
+        ),
+        "",
+        "Valid visit facts outside the requested reporting weeks:",
+        format_text_table(
+            headers=["Visit", "Company", "Property", "Local start", "Local week", "Unfinished", "Hours"],
+            rows=[
+                (visit_id, company_id, property_id, _format_local(local_start), week_start, str(is_unfinished), "N/A" if hours is None else f"{hours:.2f}")
+                for visit_id, company_id, property_id, local_start, week_start, is_unfinished, hours in outside_visits
+            ],
+            widths=[13, 8, 9, 20, 12, 10, 8],
+        ),
+        "",
+        "Valid incident facts outside the requested reporting weeks:",
+        format_text_table(
+            headers=["Incident", "Company", "Property", "Timezone", "Reported UTC", "Local reported", "Local week", "Severity", "High"],
+            rows=[
+                (
+                    incident_id, company_id, property_id, timezone,
+                    _format_utc(reported_at), _format_local(local_reported),
+                    week_start, severity, str(is_high),
+                )
+                for incident_id, company_id, property_id, timezone, reported_at,
+                    local_reported, week_start, severity, is_high in outside_incidents
+            ],
+            widths=[13, 8, 9, 20, 22, 20, 12, 10, 7],
+        ),
+        (
+            "Requested-period inclusion uses the property-local week_start_local. "
+            "A valid incident can therefore be outside the report even when its UTC timestamp "
+            "falls on the previous UTC calendar date."
         ),
         "",
         (
-            "Visits use started_at for historical company and local reporting "
+            "Rule: visits use started_at for historical company and local reporting "
             "week; incidents use reported_at."
         ),
         (
-            "Completed hours use elapsed TIMESTAMPTZ/UTC duration and are "
-            "therefore not distorted by daylight-saving clock changes."
+            "Rule: completed hours use elapsed TIMESTAMPTZ/UTC time. Unfinished visits "
+            "have no ended_at, so their duration is unknown and is never invented."
         ),
         (
-            "Visit and incident facts remain separate; later reporting "
-            "aggregates each fact independently before combining metrics."
+            "Rule: visits and incidents remain separate fact grains; they are not raw-joined before aggregation."
         ),
     ]
 
@@ -1811,7 +2047,51 @@ def _stage_10_lines(
             "property/week summary, contractor visit activity, data-quality/load "
             "evidence, definitions, findings and limitations."
         ),
+        (
+            "Pipeline Explorer Stage 10 also exposes editable company/date-range "
+            "and contractor/date-range visit drill-down queries so report totals "
+            "can be traced back to visitor, contractor, property, visit status and "
+            "known completed hours."
+        ),
     ]
+
+def get_stage_evidence_lines(
+    connection: duckdb.DuckDBPyConnection | None,
+    stage_number: int,
+) -> list[str]:
+    """Return the detailed cumulative-audit evidence for one pipeline stage.
+
+    The full pipeline runner uses this function so its detailed terminal output
+    stays aligned with reports/Report.txt instead of maintaining a second set of
+    evidence queries and tables.
+    """
+    if stage_number == 1:
+        return _stage_1_lines()
+
+    if connection is None:
+        raise ValueError(
+            f"A DuckDB connection is required for Stage {stage_number} evidence."
+        )
+
+    builders = {
+        2: _stage_2_lines,
+        3: _stage_3_lines,
+        4: _stage_4_lines,
+        5: _stage_5_lines,
+        6: _stage_6_lines,
+        7: _stage_7_lines,
+        8: _stage_8_lines,
+        9: _stage_9_lines,
+        10: _stage_10_lines,
+    }
+
+    try:
+        builder = builders[stage_number]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported stage number: {stage_number}") from exc
+
+    return builder(connection)
+
 
 def build_report_text(
     connection: duckdb.DuckDBPyConnection,
@@ -1876,3 +2156,18 @@ def write_processing_report(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(build_report_text(connection), encoding="utf-8")
     return path
+
+
+
+def main() -> None:
+    connection = connect_database(read_only=True)
+    try:
+        path = write_processing_report(connection)
+    finally:
+        connection.close()
+
+    print(f"Cumulative audit report regenerated: {path}")
+
+
+if __name__ == "__main__":
+    main()

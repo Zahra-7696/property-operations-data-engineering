@@ -1,5 +1,8 @@
+# Python virtual environments
 .venv/
 venv/
+env/
+ENV/
 
 # Python
 __pycache__/
@@ -9,18 +12,22 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 .coverage
+.coverage.*
+coverage.xml
 htmlcov/
 
 # Environment / secrets
 .env
 .env.*
 !.env.example
+.streamlit/secrets.toml
 
 # Local databases and database sidecars
 *.sqlite
 *.sqlite-*
 *.sqlite3
 *.db
+*.db-*
 *.duckdb
 *.duckdb.wal
 
@@ -33,13 +40,25 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+Desktop.ini
 
 # Temporary / generated cache files
 *.tmp
 *.log
 .cache/
+*~
+
+# Local backup / patch artefacts
+*.bak
+*.backup
+*.orig
+*.rej
+*.py.before_*
+fix_stage5_query_order.py
 
 # Packaging / build artefacts
 build/
 dist/
 *.egg-info/
+
+

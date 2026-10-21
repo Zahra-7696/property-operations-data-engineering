@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Callable
+import os
+import webbrowser
+from pathlib import Path
 
 from src.build_analytical_facts import build_analytical_facts
 from src.build_management_history import build_management_history
@@ -15,15 +17,8 @@ from src.pipeline_presenter import (
     finish_stage,
     print_stage_intro,
     print_validation_summary,
-    show_stage_2_results,
-    show_stage_3_results,
-    show_stage_4_results,
-    show_stage_5_results,
-    show_stage_6_results,
-    show_stage_7_results,
-    show_stage_8_results,
-    show_stage_9_results,
     show_stage_10_results,
+    show_detailed_stage_evidence,
 )
 from src.process_visit_state import process_visit_state
 from src.validate_visit_events import validate_visit_events
@@ -42,12 +37,59 @@ def _remove_generated_database() -> None:
             path.unlink()
 
 
-def _with_connection(renderer: Callable) -> None:
+def _with_connection_and_evidence(
+    stage_number: int,
+) -> None:
+    """Render one complete result/evidence view for the selected stage.
+
+    The detailed evidence is generated from the same source as Report.txt, so
+    the terminal pipeline does not print a compact table and then repeat the
+    same information again.
+    """
     connection = connect_database(read_only=True)
     try:
-        renderer(connection)
+        show_detailed_stage_evidence(connection, stage_number)
     finally:
         connection.close()
+
+
+def _open_html_report(report_path: Path | str) -> None:
+    """Open the generated HTML report for local runs.
+
+    GitHub Actions/CI uses ``--no-pause`` as well, so browser launch is skipped
+    there. A local interactive run and a local unattended run both open the
+    report automatically at the end.
+    """
+    path = Path(report_path).resolve()
+
+    if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
+        print("HTML report auto-open skipped in CI/headless environment.")
+        return
+
+    if not path.exists():
+        print(f"HTML report could not be opened because it does not exist: {path}")
+        return
+
+    try:
+        opened = webbrowser.open_new_tab(path.as_uri())
+    except Exception as exc:
+        opened = False
+        print(f"Automatic browser open failed: {exc}")
+
+    if opened:
+        print(f"Opened HTML report in the default browser: {path}")
+        return
+
+    # Windows fallback: open with the application's normal file association.
+    if os.name == "nt":
+        try:
+            os.startfile(str(path))  # type: ignore[attr-defined]
+            print(f"Opened HTML report with the default application: {path}")
+            return
+        except OSError as exc:
+            print(f"Automatic HTML report open failed: {exc}")
+
+    print(f"Open the report manually: {path}")
 
 
 def run_pipeline(
@@ -77,56 +119,56 @@ def run_pipeline(
     # Stage 2
     print_stage_intro(2, TOTAL_STAGES)
     load_reference_data()
-    _with_connection(show_stage_2_results)
+    _with_connection_and_evidence(2)
     print_validation_summary(2)
     finish_stage(2, TOTAL_STAGES, pause=pause)
 
     # Stage 3
     print_stage_intro(3, TOTAL_STAGES)
     land_visit_batches()
-    _with_connection(show_stage_3_results)
+    _with_connection_and_evidence(3)
     print_validation_summary(3)
     finish_stage(3, TOTAL_STAGES, pause=pause)
 
     # Stage 4
     print_stage_intro(4, TOTAL_STAGES)
     validate_visit_events()
-    _with_connection(show_stage_4_results)
+    _with_connection_and_evidence(4)
     print_validation_summary(4)
     finish_stage(4, TOTAL_STAGES, pause=pause)
 
     # Stage 5
     print_stage_intro(5, TOTAL_STAGES)
     process_visit_state()
-    _with_connection(show_stage_5_results)
+    _with_connection_and_evidence(5)
     print_validation_summary(5)
     finish_stage(5, TOTAL_STAGES, pause=pause)
 
     # Stage 6
     print_stage_intro(6, TOTAL_STAGES)
     check_visit_quality()
-    _with_connection(show_stage_6_results)
+    _with_connection_and_evidence(6)
     print_validation_summary(6)
     finish_stage(6, TOTAL_STAGES, pause=pause)
 
     # Stage 7
     print_stage_intro(7, TOTAL_STAGES)
     build_management_history()
-    _with_connection(show_stage_7_results)
+    _with_connection_and_evidence(7)
     print_validation_summary(7)
     finish_stage(7, TOTAL_STAGES, pause=pause)
 
     # Stage 8
     print_stage_intro(8, TOTAL_STAGES)
     build_analytical_facts()
-    _with_connection(show_stage_8_results)
+    _with_connection_and_evidence(8)
     print_validation_summary(8)
     finish_stage(8, TOTAL_STAGES, pause=pause)
 
     # Stage 9
     print_stage_intro(9, TOTAL_STAGES)
     build_reporting_marts()
-    _with_connection(show_stage_9_results)
+    _with_connection_and_evidence(9)
     print_validation_summary(9)
     finish_stage(9, TOTAL_STAGES, pause=pause)
 
@@ -149,6 +191,13 @@ def run_pipeline(
     print("HTML report: reports/operations_report.html")
     print("Audit report: reports/Report.txt")
     print("Model extracts: reports/extracts/")
+    print()
+
+    # Open the final report automatically for both:
+    #   python -m src.run_pipeline --fresh
+    #   python -m src.run_pipeline --fresh --no-pause
+    # Browser launch is skipped automatically in CI/GitHub Actions.
+    _open_html_report(report.report_path)
 
 
 def main() -> None:

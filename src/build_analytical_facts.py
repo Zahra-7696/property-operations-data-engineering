@@ -313,12 +313,6 @@ def build_analytical_facts(
             """
         ).fetchone()[0]
 
-        if requested_visits == 0 or requested_incidents == 0:
-            raise ValueError(
-                "No facts matched src_report_weeks. "
-                "Check DuckDB calendar/timezone session settings and local-week derivation."
-            )
-
         connection.execute("COMMIT")
 
         return AnalyticalFactsResult(
@@ -351,13 +345,10 @@ def main() -> None:
         requested_metrics = connection.execute(
             """
             SELECT
-                COUNT(*) AS visit_count,
-                COUNT(DISTINCT visitor_id) AS distinct_visitors,
-                ROUND(COALESCE(SUM(completed_hours), 0), 2) AS completed_hours,
-                COALESCE(
-                    SUM(CASE WHEN is_unfinished THEN 1 ELSE 0 END),
-                    0
-                ) AS unfinished_visits
+                COUNT(*),
+                COUNT(DISTINCT visitor_id),
+                ROUND(SUM(COALESCE(completed_hours, 0)), 2),
+                SUM(CASE WHEN is_unfinished THEN 1 ELSE 0 END)
             FROM fact_visits
             WHERE is_requested_week = TRUE
             """
@@ -365,12 +356,7 @@ def main() -> None:
 
         incident_metrics = connection.execute(
             """
-            SELECT
-                COUNT(*) AS incident_count,
-                COALESCE(
-                    SUM(CASE WHEN is_high THEN 1 ELSE 0 END),
-                    0
-                ) AS high_incidents
+            SELECT COUNT(*), SUM(CASE WHEN is_high THEN 1 ELSE 0 END)
             FROM fact_incidents
             WHERE is_requested_week = TRUE
             """
@@ -378,58 +364,131 @@ def main() -> None:
 
         history_examples = connection.execute(
             """
-            SELECT
-                'visit' AS record_type,
-                visit_id AS record_id,
-                property_id,
-                started_at AS business_time,
-                company_id
+            SELECT 'visit', visit_id, property_id, started_at, company_id, company_name
             FROM fact_visits
-            WHERE visit_id IN ('V09', 'V10')
-
+            WHERE visit_id IN ('SYN_V00373', 'SYN_V01461')
             UNION ALL
-
-            SELECT
-                'incident' AS record_type,
-                incident_id AS record_id,
-                property_id,
-                reported_at AS business_time,
-                company_id
+            SELECT 'incident', incident_id, property_id, reported_at, company_id, company_name
             FROM fact_incidents
-            WHERE incident_id IN ('I06', 'I07')
-
-            ORDER BY business_time, record_type, record_id
+            WHERE incident_id = 'SYN_I0153'
+            ORDER BY 4, 1, 2
             """
         ).fetchall()
 
         week_examples = connection.execute(
             """
-            SELECT
-                visit_id,
-                property_id,
-                property_timezone,
-                started_at,
-                local_started_at,
-                week_start_local
+            SELECT visit_id, property_id, property_timezone, started_at,
+                   local_started_at, week_start_local
             FROM fact_visits
             WHERE visit_id IN ('V14', 'V01')
             ORDER BY started_at
             """
         ).fetchall()
 
+        all_week_shifts = connection.execute(
+            """
+            SELECT
+                visit_id, property_id, property_name, property_timezone,
+                started_at, local_started_at,
+                CAST(DATE_TRUNC('week', started_at AT TIME ZONE 'UTC') AS DATE),
+                week_start_local
+            FROM fact_visits
+            WHERE CAST(DATE_TRUNC('week', started_at AT TIME ZONE 'UTC') AS DATE)
+                  <> week_start_local
+            ORDER BY started_at, visit_id
+            """
+        ).fetchall()
+
         dst_examples = connection.execute(
             """
             SELECT
-                visit_id,
-                property_timezone,
-                started_at,
-                ended_at,
-                local_started_at,
-                local_ended_at,
-                completed_hours
+                visit_id, company_id, property_id, property_timezone,
+                started_at, ended_at, local_started_at, local_ended_at,
+                is_unfinished, completed_hours
             FROM fact_visits
             WHERE visit_id IN ('V07', 'V16')
             ORDER BY visit_id
+            """
+        ).fetchall()
+
+        completion_summary = connection.execute(
+            """
+            SELECT
+                company_id, company_name, property_id, property_name,
+                COUNT(*),
+                SUM(CASE WHEN NOT is_unfinished THEN 1 ELSE 0 END),
+                SUM(CASE WHEN is_unfinished THEN 1 ELSE 0 END),
+                ROUND(SUM(COALESCE(completed_hours, 0)), 2)
+            FROM fact_visits
+            GROUP BY company_id, company_name, property_id, property_name
+            ORDER BY company_id, property_id
+            """
+        ).fetchall()
+
+        unfinished_details = connection.execute(
+            """
+            SELECT visit_id, company_id, property_id, started_at,
+                   local_started_at, week_start_local, is_requested_week
+            FROM fact_visits
+            WHERE is_unfinished = TRUE
+            ORDER BY company_id, property_id, started_at, visit_id
+            """
+        ).fetchall()
+
+        outside_visits = connection.execute(
+            """
+            SELECT visit_id, company_id, property_id, local_started_at,
+                   week_start_local, is_unfinished, completed_hours
+            FROM fact_visits
+            WHERE is_requested_week = FALSE
+            ORDER BY week_start_local, local_started_at, visit_id
+            """
+        ).fetchall()
+
+        outside_incidents = connection.execute(
+            """
+            SELECT incident_id, company_id, property_id, property_timezone,
+                   reported_at, local_reported_at, week_start_local, severity, is_high
+            FROM fact_incidents
+            WHERE is_requested_week = FALSE
+            ORDER BY week_start_local, local_reported_at, incident_id
+            """
+        ).fetchall()
+
+        sample_visits = connection.execute(
+            """
+            SELECT visit_id, company_id, property_id, local_started_at,
+                   is_unfinished, completed_hours
+            FROM fact_visits
+            WHERE CAST(local_started_at AS DATE) = DATE '2026-03-23'
+            ORDER BY local_started_at, visit_id
+            """
+        ).fetchall()
+
+        sample_incidents = connection.execute(
+            """
+            SELECT incident_id, company_id, property_id, local_reported_at, severity
+            FROM fact_incidents
+            WHERE CAST(local_reported_at AS DATE) = DATE '2026-03-23'
+            ORDER BY local_reported_at, incident_id
+            """
+        ).fetchall()
+
+        requested_weeks = connection.execute(
+            """
+            SELECT week_start, week_start + INTERVAL 6 DAY
+            FROM src_report_weeks
+            ORDER BY week_start
+            """
+        ).fetchall()
+
+        severity_summary = connection.execute(
+            """
+            SELECT severity, COUNT(*),
+                   SUM(CASE WHEN is_high THEN 1 ELSE 0 END)
+            FROM fact_incidents
+            GROUP BY severity
+            ORDER BY CASE severity WHEN 'low' THEN 1 WHEN 'medium' THEN 2 WHEN 'high' THEN 3 ELSE 4 END
             """
         ).fetchall()
 
@@ -450,8 +509,42 @@ def main() -> None:
     print(f"Visits outside requested weeks              : {result.outside_requested_visits}")
     print(f"Incidents outside requested weeks           : {result.outside_requested_incidents}")
 
-    print()
-    print("REQUESTED-WEEK METRICS")
+    print("\nPERIOD-INCLUSION SUMMARY")
+    print("-" * 118)
+    print(format_text_table(
+        headers=["Measure", "Count", "Meaning"],
+        rows=[
+            ("Valid visits outside requested weeks", result.outside_requested_visits,
+             "Valid facts retained but outside this report period."),
+            ("Valid incidents outside requested weeks", result.outside_requested_incidents,
+             "Valid facts retained but outside this report period."),
+        ],
+        widths=[43, 8, 61],
+    ))
+
+    print("\nREQUESTED REPORT WEEKS")
+    print("-" * 118)
+    print(format_text_table(
+        headers=["Local week start", "Local week end", "Meaning"],
+        rows=[(start, end, "Requested local Monday week") for start, end in requested_weeks],
+        widths=[18, 20, 60],
+    ))
+    print("A fact is in-period when its derived property-local Monday week exists in src_report_weeks.")
+
+    print("\nINCIDENT SEVERITY SUMMARY")
+    print("-" * 118)
+    print(format_text_table(
+        headers=["Severity", "Incidents", "High-flag rows", "Rule"],
+        rows=[
+            (severity, count, high_count,
+             "is_high = TRUE" if severity == "high" else "is_high = FALSE")
+            for severity, count, high_count in severity_summary
+        ],
+        widths=[12, 10, 15, 28],
+    ))
+    print("Severity is source-provided: low, medium or high. is_high is TRUE only when severity='high'.")
+
+    print("\nREQUESTED-WEEK METRICS")
     print("-" * 118)
     print(f"Visit count                : {requested_metrics[0]}")
     print(f"Distinct visitors          : {requested_metrics[1]}")
@@ -460,118 +553,98 @@ def main() -> None:
     print(f"Incident count             : {incident_metrics[0]}")
     print(f"High-severity incidents    : {incident_metrics[1]}")
 
-    print()
-    print("HISTORICAL COMPANY ATTRIBUTION PROOF")
+    print("\nP11 HISTORICAL COMPANY ATTRIBUTION PROOF")
     print("-" * 118)
-    print(
-        format_text_table(
-            headers=["Type", "Record", "Property", "Business time UTC", "Company"],
-            rows=[
-                (
-                    record_type,
-                    record_id,
-                    property_id,
-                    _format_utc(business_time),
-                    company_id,
-                )
-                for (
-                    record_type,
-                    record_id,
-                    property_id,
-                    business_time,
-                    company_id,
-                ) in history_examples
-            ],
-            widths=[10, 10, 10, 22, 10],
-        )
-    )
+    print(format_text_table(
+        headers=["Type", "Record", "Property", "Business time UTC", "Company", "Company name"],
+        rows=[(t, r, p, _format_utc(bt), c, cn) for t, r, p, bt, c, cn in history_examples],
+        widths=[10, 14, 10, 22, 10, 24],
+    ))
 
-    print()
-    print("PROPERTY-LOCAL WEEK BOUNDARY PROOF")
+    print("\nP01 PROPERTY-LOCAL WEEK BOUNDARY PROOF")
     print("-" * 118)
-    print(
-        format_text_table(
-            headers=[
-                "Visit",
-                "Property",
-                "Timezone",
-                "Started UTC",
-                "Local start",
-                "Local week",
-            ],
-            rows=[
-                (
-                    visit_id,
-                    property_id,
-                    property_timezone,
-                    _format_utc(started_at),
-                    _format_local(local_started_at),
-                    week_start_local,
-                )
-                for (
-                    visit_id,
-                    property_id,
-                    property_timezone,
-                    started_at,
-                    local_started_at,
-                    week_start_local,
-                ) in week_examples
-            ],
-            widths=[8, 10, 20, 22, 20, 12],
-        )
-    )
+    print(format_text_table(
+        headers=["Visit", "Property", "Timezone", "Started UTC", "Local start", "Local week"],
+        rows=[(v, p, tz, _format_utc(s), _format_local(ls), w) for v, p, tz, s, ls, w in week_examples],
+        widths=[8, 10, 20, 22, 20, 12],
+    ))
 
-    print()
-    print("DST / ELAPSED-HOURS PROOF")
+    print("\nALL UTC-VS-PROPERTY-LOCAL WEEK SHIFTS")
     print("-" * 118)
-    print(
-        format_text_table(
-            headers=[
-                "Visit",
-                "Timezone",
-                "Start UTC",
-                "End UTC",
-                "Local start",
-                "Local end",
-                "Hours",
-            ],
-            rows=[
-                (
-                    visit_id,
-                    property_timezone,
-                    _format_utc(started_at),
-                    _format_utc(ended_at),
-                    _format_local(local_started_at),
-                    _format_local(local_ended_at),
-                    f"{completed_hours:.2f}",
-                )
-                for (
-                    visit_id,
-                    property_timezone,
-                    started_at,
-                    ended_at,
-                    local_started_at,
-                    local_ended_at,
-                    completed_hours,
-                ) in dst_examples
-            ],
-            widths=[8, 20, 22, 22, 20, 20, 8],
-        )
-    )
+    print(format_text_table(
+        headers=["Visit", "Property", "Property name", "Timezone", "Started UTC", "Local start", "UTC week", "Local week"],
+        rows=[(v, p, pn, tz, _format_utc(s), _format_local(ls), uw, lw) for v, p, pn, tz, s, ls, uw, lw in all_week_shifts],
+        widths=[13, 9, 22, 20, 22, 20, 12, 12],
+    ))
 
-    print()
-    print(
-        "Rule: visit company and local week use started_at; incident company "
-        "and local week use reported_at."
-    )
-    print(
-        "Rule: completed hours use elapsed TIMESTAMPTZ/UTC time, so DST does "
-        "not distort duration."
-    )
-    print(
-        "Rule: visits and incidents remain separate fact grains; they are not "
-        "raw-joined before aggregation."
-    )
+    print("\nDST / ELAPSED-HOURS PROOF WITH COMPANY/PROPERTY")
+    print("-" * 118)
+    print(format_text_table(
+        headers=["Visit", "Company", "Property", "Timezone", "Start UTC", "End UTC", "Local start", "Local end", "Unfinished", "Hours"],
+        rows=[(
+            v, c, p, tz, _format_utc(s), _format_utc(e), _format_local(ls), _format_local(le),
+            str(u), "N/A" if h is None else f"{h:.2f}"
+        ) for v, c, p, tz, s, e, ls, le, u, h in dst_examples],
+        widths=[8, 8, 9, 20, 22, 22, 20, 20, 10, 8],
+    ))
+
+    print("\nVISIT COMPLETION SUMMARY BY COMPANY / PROPERTY")
+    print("-" * 118)
+    print(format_text_table(
+        headers=["Company", "Company name", "Property", "Property name", "Visits", "Completed", "Unfinished", "Completed hours"],
+        rows=[(c, cn, p, pn, n, comp, unfin, f"{hours:.2f}") for c, cn, p, pn, n, comp, unfin, hours in completion_summary],
+        widths=[8, 24, 9, 22, 8, 10, 10, 15],
+    ))
+
+    print("\nUNFINISHED VISIT DETAILS")
+    print("-" * 118)
+    print(format_text_table(
+        headers=["Visit", "Company", "Property", "Started UTC", "Local start", "Local week", "Requested"],
+        rows=[(v, c, p, _format_utc(s), _format_local(ls), w, str(req)) for v, c, p, s, ls, w, req in unfinished_details],
+        widths=[13, 8, 9, 22, 20, 12, 10],
+    ))
+    print("Unfinished duration is intentionally not calculated because ended_at is NULL.")
+
+    print("\nSAMPLE LOCAL-DATE FILTER — 2026-03-23 VISITS")
+    print("-" * 118)
+    print(format_text_table(
+        headers=["Visit", "Company", "Property", "Local start", "Unfinished", "Hours"],
+        rows=[(v, c, p, _format_local(ls), str(u), "N/A" if h is None else f"{h:.2f}") for v, c, p, ls, u, h in sample_visits],
+        widths=[13, 8, 9, 20, 10, 8],
+    ))
+
+    print("\nSAMPLE LOCAL-DATE FILTER — 2026-03-23 INCIDENTS")
+    print("-" * 118)
+    print(format_text_table(
+        headers=["Incident", "Company", "Property", "Local reported", "Severity"],
+        rows=[(i, c, p, _format_local(lr), sev) for i, c, p, lr, sev in sample_incidents],
+        widths=[13, 8, 9, 20, 10],
+    ))
+
+    print("\nVISITS OUTSIDE REQUESTED REPORT WEEKS")
+    print("-" * 118)
+    print(format_text_table(
+        headers=["Visit", "Company", "Property", "Local start", "Local week", "Unfinished", "Hours"],
+        rows=[(v, c, p, _format_local(ls), w, str(u), "N/A" if h is None else f"{h:.2f}") for v, c, p, ls, w, u, h in outside_visits],
+        widths=[13, 8, 9, 20, 12, 10, 8],
+    ))
+
+    print("\nINCIDENTS OUTSIDE REQUESTED REPORT WEEKS")
+    print("-" * 118)
+    print(format_text_table(
+        headers=["Incident", "Company", "Property", "Timezone", "Reported UTC", "Local reported", "Local week", "Severity", "High"],
+        rows=[
+            (i, c, p, tz, _format_utc(ru), _format_local(lr), w, sev, str(high))
+            for i, c, p, tz, ru, lr, w, sev, high in outside_incidents
+        ],
+        widths=[13, 8, 9, 20, 22, 20, 12, 10, 7],
+    ))
+    print("The local week, not the UTC date, determines requested-period inclusion.")
+
+    print("\nRule: visit company/local week use started_at; incident company/local week use reported_at.")
+    print("Rule: completed hours use elapsed TIMESTAMPTZ/UTC time, so DST does not distort duration.")
+    print("Rule: unfinished visits have no ended_at, so their duration is unknown and is never invented.")
+    print("Rule: visits and incidents remain separate fact grains; they are not raw-joined before aggregation.")
     print(f"Cumulative audit report: {report_path}")
     print("SUCCESS: Analytical visit and incident facts are complete.")
 

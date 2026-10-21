@@ -218,77 +218,47 @@ def build_management_history(
 def _boundary_examples(
     connection: duckdb.DuckDBPyConnection,
 ) -> list[tuple[object, ...]]:
-    """
-    Return real supplied P03 records around the management transfer boundary.
-
-    Visits are included when Stage 5 state is present. Incidents come from the
-    Stage 2 reference layer.
-    """
-    examples: list[tuple[object, ...]] = []
-
-    visit_rows = connection.execute(
+    """Return P03 boundary records together with the interval that matched them."""
+    return connection.execute(
         """
-        SELECT visit_id, property_id, started_at
-        FROM visit_current_state
-        WHERE visit_id IN ('V09', 'V10')
-        ORDER BY started_at, visit_id
-        """
-    ).fetchall()
-
-    for visit_id, property_id, event_time in visit_rows:
-        company = connection.execute(
-            """
-            SELECT company_id
-            FROM property_management_intervals
-            WHERE property_id = ?
-              AND ? >= valid_from
-              AND (valid_to IS NULL OR ? < valid_to)
-            """,
-            [property_id, event_time, event_time],
-        ).fetchone()
-
-        examples.append(
-            (
-                "visit",
-                visit_id,
+        WITH records AS (
+            SELECT
+                'visit' AS record_type,
+                visit_id AS record_id,
                 property_id,
-                _format_utc(event_time),
-                None if company is None else company[0],
-            )
-        )
+                started_at AS business_time
+            FROM visit_current_state
+            WHERE visit_id IN ('V09', 'V10')
 
-    incident_rows = connection.execute(
-        """
-        SELECT incident_id, property_id, reported_at
-        FROM src_incidents
-        WHERE incident_id IN ('I06', 'I07')
-        ORDER BY reported_at, incident_id
-        """
-    ).fetchall()
+            UNION ALL
 
-    for incident_id, property_id, event_time in incident_rows:
-        company = connection.execute(
-            """
-            SELECT company_id
-            FROM property_management_intervals
-            WHERE property_id = ?
-              AND ? >= valid_from
-              AND (valid_to IS NULL OR ? < valid_to)
-            """,
-            [property_id, event_time, event_time],
-        ).fetchone()
-
-        examples.append(
-            (
-                "incident",
+            SELECT
+                'incident',
                 incident_id,
                 property_id,
-                _format_utc(event_time),
-                None if company is None else company[0],
-            )
+                reported_at
+            FROM src_incidents
+            WHERE incident_id IN ('I06', 'I07')
         )
-
-    return sorted(examples, key=lambda row: (row[3], row[0], row[1]))
+        SELECT
+            r.record_type,
+            r.record_id,
+            r.property_id,
+            strftime(r.business_time, '%Y-%m-%dT%H:%M:%SZ') AS business_time_utc,
+            m.company_id,
+            strftime(m.valid_from, '%Y-%m-%dT%H:%M:%SZ') AS interval_from_utc,
+            CASE
+                WHEN m.valid_to IS NULL THEN 'CURRENT'
+                ELSE strftime(m.valid_to, '%Y-%m-%dT%H:%M:%SZ')
+            END AS interval_to_utc
+        FROM records AS r
+        JOIN property_management_intervals AS m
+            ON m.property_id = r.property_id
+           AND r.business_time >= m.valid_from
+           AND (m.valid_to IS NULL OR r.business_time < m.valid_to)
+        ORDER BY r.business_time, r.record_type, r.record_id
+        """
+    ).fetchall()
 
 
 def main() -> None:
@@ -440,10 +410,16 @@ def main() -> None:
     print("-" * 118)
     print(
         format_text_table(
-            headers=["Type", "Record", "Property", "Business time UTC", "Company"],
+            headers=["Type", "Record", "Property", "Business time UTC", "Company", "Interval from", "Interval to"],
             rows=boundaries,
-            widths=[10, 10, 10, 22, 10],
+            widths=[10, 10, 10, 22, 10, 22, 22],
         )
+    )
+
+    print(
+        "Boundary rule: intervals are [valid_from, valid_to). Therefore the C02 "
+        "interval can end at 13:00 and still own 12:59; 13:00 itself is excluded "
+        "from C02 and belongs to the new C03 interval."
     )
 
     print()

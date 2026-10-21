@@ -12,3 +12,12 @@ data/visit_changes/*.jsonl -text
 *.toml text eol=lf
 *.ini text eol=lf
 *.txt text eol=lf
+*.html text eol=lf
+*.jinja2 text eol=lf
+
+# Generated report extracts are text artefacts and should diff cleanly.
+reports/extracts/*.csv text eol=lf
+
+# Repository control files.
+.gitignore text eol=lf
+.gitattributes text eol=lf
