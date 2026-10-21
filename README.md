@@ -395,13 +395,1487 @@ directory. The root should contain `DATASET_MANIFEST.json`, `manifest.json`,
 `data/`, `src/`, `sql/` and `reports/`. Missing, unreadable or modified source
 files are reported clearly.
 
-The explorer also opens the generated `reports/operations_report.html` from the
-report/CI stages while keeping the business report separate from the engineering
-audit trail.
+The explorer keeps the generated `reports/operations_report.html` separate from the
+engineering audit trail. After a successful local Stage 10 run, the business report
+opens automatically in the default browser; the normal in-page report control is
+also retained as a fallback.
 
 The SQL interface is intentionally read-only. It accepts inspection statements
 such as `SELECT`, `WITH`, `SHOW`, `DESCRIBE` and `EXPLAIN` and rejects
 state-changing SQL.
+
+---
+
+---
+
+## Stage 1 — Setup and raw-data integrity
+
+### Aim
+
+Establish a trustworthy and reproducible starting point before any modelling.
+Stage 1 proves that every supplied raw file is the exact input delivered for the
+assignment, protects those bytes from accidental Git/Windows line-ending changes,
+and creates a Python/Git environment from which all later database results can be
+rebuilt.
+
+### Questions answered
+
+- Are the raw files exactly the files supplied for the assignment?
+- Have row counts or file bytes changed before processing?
+- Can later results be reproduced from a known raw-data baseline?
+
+### How this stage solves them
+
+`src/verify_sources.py` checks every supplied file against
+`DATASET_MANIFEST.json` using row counts and SHA256 hashes. `.gitattributes`
+protects raw CSV/JSONL bytes from line-ending conversion, while the project
+environment and dependencies make the later pipeline reproducible.
+
+### Why it is needed
+
+`DATASET_MANIFEST.json` provides expected row counts and SHA256 checksums. The
+source includes deliberately malformed JSONL records, so source integrity and
+record validity must remain separate concerns.
+
+### Files
+
+| File | Role |
+| --- | --- |
+| `requirements.txt` | Python dependency definition |
+| `.gitignore` | Excludes environments, secrets and generated databases |
+| `.gitattributes` | Preserves raw CSV/JSONL files byte-for-byte across operating systems |
+| `src/verify_sources.py` | Checks supplied row counts and SHA256 checksums |
+| `src/__init__.py` | Makes `src` importable as a Python package |
+
+### Run
+
+```powershell
+python -m src.verify_sources
+```
+
+Expected final result:
+
+```text
+SUCCESS: All supplied source files match DATASET_MANIFEST.json.
+```
+
+---
+### Validation / tests
+
+Stage 1 has no separate pytest test file. Its validation command successfully
+verified all 12 supplied files against the expected row counts and SHA256 hashes.
+
+
+---
+
+## Stage 2 — Persistent typed reference layer
+
+### Aim
+
+Create a persistent DuckDB database and load the six static/reference CSV
+sources into typed tables.
+
+The visit-change JSONL batches are deliberately excluded from this stage because
+they require dedicated duplicate, validation, version and delete logic.
+
+### Questions answered
+
+- What stable companies, contractors, properties, incidents and report weeks exist?
+- Can source strings and timestamps be represented with explicit database types?
+- Are the reference relationships internally consistent?
+
+### How this stage solves them
+
+`sql/schema.sql` defines typed `src_*` tables and `src/load_reference_data.py`
+loads the six reference sources inside one transaction. Row counts and logical
+references are checked before commit, producing the persistent DuckDB foundation
+used by later stages.
+
+### Why this stage exists
+
+Later visit processing needs reliable reference entities for property,
+contractor, company and incident relationships. Loading these stable CSV sources
+first keeps reference-data validation separate from the more complicated
+versioned visit-event logic.
+
+### Database
+
+Generated locally at:
+
+```text
+data/modelled/onside.duckdb
+```
+
+The database file is excluded from Git because it is fully rebuildable from the
+committed raw data and code.
+
+### Source tables
+
+| Table | Grain | Primary key |
+| --- | --- | --- |
+| `src_companies` | One managing company | `company_id` |
+| `src_contractors` | One contractor | `contractor_id` |
+| `src_properties` | One property | `property_id` |
+| `src_property_management` | One management observation | `observation_id` |
+| `src_incidents` | One incident | `incident_id` |
+| `src_report_weeks` | One requested report week | `week_start` |
+
+### Stage 2 files and how they connect
+
+```text
+sql/schema.sql
+      |
+      v
+src/database.py
+      |
+      +---- creates/connects to data/modelled/onside.duckdb
+      |
+      v
+src/load_reference_data.py
+      |
+      +---- reads the six supplied CSV files
+      +---- loads typed source tables in one transaction
+      +---- validates counts and logical references
+      |
+      v
+tests/test_reference_data.py
+      |
+      +---- independently checks the loaded source layer
+```
+
+File responsibilities:
+
+| File | Responsibility |
+| --- | --- |
+| `sql/schema.sql` | Defines the typed DuckDB source tables |
+| `src/database.py` | Central database path, connection and schema setup |
+| `src/load_reference_data.py` | Loads and validates all six static/reference sources atomically |
+| `tests/test_reference_data.py` | Automated checks for counts, references, severity and report-week rules |
+| `docs/DATA_MODEL.md` | Documents grains, keys and source-layer design choices |
+| `pytest.ini` | Makes project-root modules available consistently when running pytest |
+
+### Run Stage 2
+
+First verify the immutable raw layer:
+
+```powershell
+python -m src.verify_sources
+```
+
+Then rebuild the typed reference layer:
+
+```powershell
+python -m src.load_reference_data
+```
+
+Then run its automated tests:
+
+```powershell
+python -m pytest tests/test_reference_data.py -q
+```
+
+Expected reference counts:
+
+```text
+src_companies                3
+src_contractors              8
+src_properties              24
+src_property_management     62
+src_incidents              247
+src_report_weeks             6
+```
+
+The loader runs inside one transaction. If loading or validation fails before
+commit, DuckDB rolls back instead of leaving a partially rebuilt reference layer.
+
+---
+### Validation / tests
+
+```text
+Stage-specific tests: 11 passed
+Cumulative tests after Stage 2: 11 passed
+```
+
+The tests cover reference row counts, logical relationships, severity values and
+report-week rules.
+
+
+---
+
+## Stage 3 — Manifest-driven visit batch landing
+
+### Aim
+
+Land the six visit-change files in the exact order declared by `manifest.json`
+while preserving every physical input line and recording durable batch progress.
+
+This stage intentionally **does not parse or clean JSON yet**. The source contains
+deliberately malformed lines, so the raw landing layer must retain those lines for
+the next technical-validation stage.
+
+### Questions answered
+
+- Which visit batches arrived, and in what manifest order?
+- What exact physical source line came from which batch and line number?
+- Can a batch be replayed or restarted without duplicating or partially landing data?
+
+### How this stage solves them
+
+`src/land_visit_batches.py` reads `manifest.json`, records each batch in
+`ingestion_batches`, and preserves every physical JSONL line in `raw_visit_lines`.
+Each batch lands transactionally; an already-landed batch is a no-op on replay,
+and a failed attempt can restart without partial raw rows.
+
+### Why this stage exists
+
+The assignment requires:
+
+- initial processing in manifest order;
+- stable batch IDs and contents;
+- safe replay of an already processed batch;
+- batch progress and useful loading counts;
+- evidence of invalid source lines;
+- restart after failure without partial application.
+
+Stage 3 establishes the durable raw/audit foundation for those requirements.
+
+### New database tables
+
+| Table | Grain | Purpose |
+| --- | --- | --- |
+| `ingestion_batches` | One manifest batch | Batch identity, order, source hash, status, attempts and loading/quality counters used across later stages |
+| `raw_visit_lines` | One physical batch line | Preserve raw source text and exact line location before JSON parsing |
+
+A successful Stage 3 batch has status `landed`. It will become `completed` only
+in later stages after validation and business-state processing succeed.
+
+### Stage 3 files and flow
+
+```text
+manifest.json
+     |
+     v
+src/land_visit_batches.py
+     |
+     +---- verifies stable batch identity/content
+     +---- records processing attempt
+     +---- lands every physical JSONL line transactionally
+     +---- marks batch landed / failed
+     |
+     v
+DuckDB
+  ingestion_batches
+  raw_visit_lines
+     |
+     v
+tests/test_batch_landing.py
+```
+
+| File | Responsibility |
+| --- | --- |
+| `sql/schema.sql` | Adds batch-audit and raw-line tables |
+| `src/database.py` | Supports the normal database and isolated temporary test databases |
+| `src/land_visit_batches.py` | Reads manifest order, lands batches, prevents replay changes and supports restart |
+| `tests/test_batch_landing.py` | Checks counts, order, replay no-op and simulated failure/restart |
+| `docs/DATA_MODEL.md` | Documents the new landing grains and lifecycle |
+
+### Run Stage 3
+
+The Stage 2 reference layer should already exist.
+
+Land the visit batches:
+
+```powershell
+python -m src.land_visit_batches
+```
+
+Expected totals:
+
+```text
+6 manifest batches
+1,997 raw visit input lines
+```
+
+Run the Stage 3 tests:
+
+```powershell
+python -m pytest tests/test_batch_landing.py -q
+```
+
+Then rerun the landing command:
+
+```powershell
+python -m src.land_visit_batches
+```
+
+The second run should show each batch as `skipped`. That demonstrates replay is
+a no-op at this layer.
+
+### Important boundary
+
+Stage 3 answers:
+
+> What exact batch lines arrived, in what batch/order, and can I land them safely?
+
+Stage 4 answers:
+
+> Which of those lines are technically valid JSON events, and why are invalid
+> lines rejected?
+
+Duplicate `event_id`, `source_version`, deletes and current visit state are handled
+after technical validation, not silently mixed into raw landing.
+### Validation / tests
+
+```text
+Stage-specific tests: 6 passed
+Cumulative tests after Stage 3: 17 passed
+```
+
+The tests cover manifest order, exact raw-line counts, line numbering, replay
+no-op behaviour and rollback/restart after a simulated batch failure.
+
+
+---
+
+## Stage 4 — Technical visit-event validation
+
+### Aim
+
+Parse every landed JSONL line and separate technically valid visit-change events
+from technically invalid input while retaining evidence for every rejected line.
+
+This stage does **not** yet decide which event wins for a visit and does not check
+business references or business duration.
+
+### Questions answered
+
+- Which landed lines are technically valid visit-change events?
+- Which lines are rejected, and exactly why?
+- Can invalid lines be retained as evidence without blocking valid lines?
+
+### How this stage solves them
+
+`src/validate_visit_events.py` parses each raw line and validates identifiers,
+versions, operations, timestamp shape and required payload fields. Valid
+deliveries go to `validated_visit_events`; invalid lines go to
+`visit_event_rejects` with batch, line, raw payload and reason.
+
+### Why this stage exists
+
+The assignment requires technically invalid events to be recorded with batch ID,
+line number and an explanation while valid events continue to load.
+
+### New tables
+
+| Table | Grain | Purpose |
+| --- | --- | --- |
+| `validated_visit_events` | One technically valid physical event-delivery line | Typed source event ready for deduplication/version logic |
+| `visit_event_rejects` | One technically invalid physical input line | Original payload plus rejection codes and explanation |
+
+### Flow
+
+```text
+raw_visit_lines
+      |
+      v
+src/validate_visit_events.py
+      |
+      +----------------------+
+      |                      |
+      v                      v
+validated_visit_events   visit_event_rejects
+      |
+      +----> reports/Report.txt
+      |
+      v
+tests/test_visit_validation.py
+```
+
+### Files
+
+| File | Responsibility |
+| --- | --- |
+| `sql/schema.sql` | Adds technically validated-event and reject tables |
+| `src/validate_visit_events.py` | Implements technical JSON/event validation and prints reject evidence |
+| `src/audit_report.py` | Rebuilds the cumulative engineering/audit `reports/Report.txt` |
+| `tests/test_visit_validation.py` | Checks expected counts, rejection categories and replay |
+| `docs/DATA_MODEL.md` | Adds Stage 4 to the cumulative data-model documentation |
+
+### Run
+
+```powershell
+python -m src.validate_visit_events
+```
+
+Expected totals:
+
+```text
+Technically valid event lines:   1979
+Technically invalid event lines: 18
+```
+
+After the summary, the command prints the 18 rejected records in a fixed-width evidence table. Each rejected row keeps the human-readable category/reason together with the machine-readable reason codes, exact source reference and raw source record:
+
+```text
+batch ID + line number
+event ID when recoverable
+reject category
+human-readable reason
+reason codes
+source reference
+raw source record
+```
+
+The same evidence is written cumulatively to:
+
+```text
+reports/Report.txt
+```
+
+`Report.txt` uses fixed-width ASCII tables so it remains readable in PowerShell, GitHub and plain-text editors. It is the engineering/audit report. The later
+`reports/operations_report.html` is the separate business-facing report.
+
+Then:
+
+```powershell
+python -m pytest tests/test_visit_validation.py -q
+python -m pytest -q
+```
+
+Rerun:
+
+```powershell
+python -m src.validate_visit_events
+```
+
+The second validation run should show all batches as `skipped`.
+
+### Validation / tests
+
+```text
+Stage-specific tests: 12 passed
+Cumulative tests after Stage 4: 29 passed
+```
+
+The tests cover technical-valid/invalid counts, rejection categories, reject
+evidence, timestamp validation and validation replay.
+
+### Boundary
+
+Stage 4 answers:
+
+> Is this physical source line a technically valid visit-change event?
+
+Stage 5 answers:
+
+> Is it a repeated event delivery, which `source_version` wins for the visit, and
+> should the visit be upserted, deleted or reactivated?
+
+---
+
+## Stage 5 — Deduplication, version precedence and current visit state
+
+### Aim
+
+Stage 5 converts the technically valid event deliveries from Stage 4 into a trustworthy event history and one latest state per visit. Here, “technically valid” means the JSON structure, required fields, types and timestamps are valid enough for the system to understand the event, but that does not mean the delivery is unique or that it is the newest version of the visit. The same `event_id` may be delivered more than once, and several different events may describe different `source_version`s of the same `visit_id`. This stage therefore deduplicates repeated event deliveries, keeps every unique event for audit, applies only a strictly newer `source_version` to the current visit state, preserves older/equal versions as stale history, and keeps delete tombstones so an older upsert cannot incorrectly restore a deleted visit.
+
+### Questions answered
+
+- Which technically valid deliveries are repeated `event_id`s?
+- Which unique event is newer or stale for each `visit_id`?
+- What is the latest active/deleted state of every visit?
+- Can an older upsert incorrectly resurrect a deleted visit?
+
+### How this stage solves them
+
+`src/process_visit_state.py` deduplicates globally by `event_id`, preserves
+duplicate evidence, and applies only a strictly higher `source_version` to
+`visit_current_state`. Deletes remain as tombstones, while a genuinely newer
+upsert may reactivate a visit. Unique stale/equal-version events remain in
+`visit_events` for audit.
+
+### Why this stage exists
+
+A delivered line is not necessarily a new business event or a new visit.
+
+- the same `event_id` may be delivered repeatedly;
+- different unique events may refer to the same `visit_id`;
+- lower versions can arrive after higher versions;
+- deletes must remain as tombstones;
+- a genuinely newer upsert may reactivate a deleted visit.
+
+The precedence rule is:
+
+```text
+highest source_version per visit_id wins
+```
+
+### New tables
+
+| Table | Grain | Purpose |
+| --- | --- | --- |
+| `visit_events` | One globally unique `event_id` | Deduplicated event history plus applied/stale outcome |
+| `visit_event_duplicates` | One repeated physical delivery | Duplicate evidence linked to the canonical first event |
+| `visit_current_state` | One `visit_id` | Highest-version current state, including delete tombstones |
+
+### Flow
+
+```text
+validated_visit_events
+          |
+          v
+src/process_visit_state.py
+          |
+          +-----------------------------+
+          |              |              |
+          v              v              v
+     visit_events   duplicate audit   visit_current_state
+          |
+          +----> reports/Report.txt
+          |
+          v
+tests/test_visit_state.py
+```
+
+### Expected results
+
+```text
+1,979 technically valid physical deliveries
+1,944 unique event IDs
+35 duplicate deliveries
+
+1,890 applied state changes
+54 stale/equal-version unique events
+
+1,618 current visit states
+1,567 active visits
+51 deleted visits
+```
+
+The console and cumulative `reports/Report.txt` show:
+
+- per-batch unique/duplicate/applied/stale counts;
+- every duplicate delivery with duplicate and canonical source references;
+- every stale/equal-version unique event with incoming-versus-existing version evidence;
+- V02/V03/V04 version/delete examples;
+- all 51 deleted current-state tombstones.
+
+For event-history inspection, examples are displayed in true processing order using manifest batch order and physical line number. This makes cases such as V02 explicit: version 1 is applied, version 2 delete becomes current, and a later-arriving version 1 event is retained as stale history rather than appearing misleadingly beside the earlier version-1 row.
+
+### Run
+
+```powershell
+python -m src.process_visit_state
+```
+
+Then:
+
+```powershell
+python -m pytest tests/test_visit_state.py -q
+python -m pytest -q
+```
+
+Finally rerun:
+
+```powershell
+python -m src.process_visit_state
+```
+
+The second run should show every batch as `skipped`.
+
+### Validation / tests
+
+```text
+Stage-specific tests: 11 passed
+Cumulative tests after Stage 5: 40 passed
+```
+
+The tests cover event deduplication, source-version precedence, V02 tombstone
+protection, V04 reactivation, V03 correction, replay and rollback/restart.
+
+### Boundary
+
+Stage 5 answers:
+
+> Which deliveries are repeated events, and what is the highest-version source
+> state of each visit?
+
+Stage 6 answers:
+
+> Is each latest active visit valid for business reporting?
+
+---
+
+## Stage 6 — Business quality on current active visits
+
+### Aim
+
+Stage 6 checks whether each latest active visit is suitable for business reporting, which is different from being technically valid. A record may have valid JSON, valid field types and valid timestamps, yet still contain a business-quality problem, such as a `property_id` that does not exist in the property reference table, an unknown `contractor_id`, or a completed visit whose `ended_at` is earlier than `started_at`. These records are not treated as malformed and are not deleted; they are preserved with exact source evidence in `visit_quality_issues` and excluded from `reportable_current_visits`. Deleted visits remain separate tombstones, while unfinished visits with `ended_at = NULL` remain valid for later reporting.
+
+### Questions answered
+
+- Which latest active visits are structurally valid but unsuitable for business metrics?
+- Does a visit reference an unknown property or contractor?
+- Does a completed visit end before it starts?
+- Are deleted and unfinished visits handled separately from quality failures?
+
+### How this stage solves them
+
+`src/check_visit_quality.py` checks the latest active visit state against the
+reference tables and duration rule. Problems are preserved in
+`visit_quality_issues` with source evidence, while
+`reportable_current_visits` exposes only active visits that pass the business
+checks. Deleted visits stay tombstones and unfinished visits remain valid.
+
+### Why this stage exists
+
+A record can be valid JSON and still be unsuitable for business metrics.
+
+The assignment explicitly defines these as business-quality issues:
+
+```text
+unknown property_id
+unknown contractor_id
+ended_at earlier than started_at
+```
+
+They are preserved for audit but excluded from visit metrics.
+
+Deleted visits are **not** quality failures. Unfinished visits with
+`ended_at = NULL` are valid.
+
+### New model objects
+
+| Object | Grain | Purpose |
+| --- | --- | --- |
+| `visit_quality_issues` | One issue per visit + issue code | Preserve current business-quality exceptions and their source evidence |
+| `reportable_current_visits` | One active quality-valid current visit | Clean input for later analytical visit facts |
+
+### Expected results
+
+```text
+1,618 current visit states
+51 deleted tombstones
+
+1,567 active current visits
+3 business-invalid active visits
+1,564 reportable active visits
+```
+
+Expected exceptions:
+
+```text
+V11  end_before_start
+V12  unknown_property
+V13  unknown_contractor
+```
+
+For `V11`, the console and `reports/Report.txt` show the direct timestamp proof:
+
+```text
+started_at = 2026-03-25T01:00:00Z
+ended_at   = 2026-03-25T00:00:00Z
+duration   = -60.0 minutes
+```
+
+### Run
+
+```powershell
+python -m src.check_visit_quality
+```
+
+Then:
+
+```powershell
+python -m pytest tests/test_visit_quality.py -q
+python -m pytest -q
+```
+
+The command also extends the cumulative:
+
+```text
+reports/Report.txt
+```
+
+with issue counts, exact source references and exclusion reasons.
+
+### Validation / tests
+
+```text
+Stage-specific tests: 10 passed
+Cumulative tests after Stage 6: 50 passed
+```
+
+The tests cover V11/V12/V13 business-quality rules, reportable visit counts,
+unfinished visits, deleted tombstones, cumulative report evidence and idempotency.
+
+### Boundary
+
+Stage 6 answers:
+
+> Which latest active visits are suitable for business metrics?
+
+Stage 7 answers:
+
+> Which company managed each property at each point in time?
+
+---
+
+## Stage 7 — Property-management history
+
+### Aim
+
+Stage 7 turns the 62 unsorted property-management observations into a reliable
+business-time history. A source observation says which company manages a
+property from `effective_at`, but repeated observations can describe the same
+unchanged manager. This stage collapses only consecutive unchanged states,
+preserves a later return to a previous company as a separate interval, and
+creates `[valid_from, valid_to)` periods so a visit or incident can later be
+assigned to the company that actually managed the property when it occurred.
+It also creates a separate current-management lookup, because today's manager
+can differ from the company responsible for an older activity record.
+
+### Questions answered
+
+- What company managed each property at any given business timestamp?
+- Which management observations represent real changes versus unchanged repeats?
+- Does returning to an earlier company create a new historical period?
+- Which company currently manages each property?
+- Which company owns the exact transfer timestamp?
+
+### How this stage solves them
+
+`src/build_management_history.py` sorts observations by property and
+`effective_at`, detects company changes with window functions, collapses each
+consecutive unchanged run, and uses the next change time as `valid_to`.
+`property_management_intervals` stores the history and
+`current_property_management` exposes the single open interval for each property.
+The cumulative audit report shows the full interval history and exact boundary
+examples.
+
+### Why this stage exists
+
+A direct join from visits/incidents to `property_management` on `property_id`
+would create multiple matches because each property can have several management
+observations. Historical reporting therefore needs effective-dated intervals,
+not merely the latest company or a property-only join.
+
+### New model objects
+
+| Object | Grain | Purpose |
+| --- | --- | --- |
+| `property_management_intervals` | One contiguous manager interval per property | Historical company attribution using business time |
+| `current_property_management` | One current row per property | Explicit current manager lookup with names |
+
+### Expected results
+
+```text
+62 source observations
+37 historical intervals
+25 unchanged observations collapsed
+24 properties
+24 current-management rows
+```
+
+### What the Stage 7 totals mean
+
+| Result | Meaning |
+| --- | --- |
+| `62 source management observations` | The original rows in `src_property_management`; each is a source statement that a company manages a property from an `effective_at` time. |
+| `37 historical management intervals` | The real contiguous management periods after consecutive unchanged observations are collapsed. |
+| `25 unchanged observations collapsed` | `62 - 37 = 25` repeated observations confirmed an already-current manager and therefore did not start a new business interval. |
+| `24 properties represented` | All 24 properties have management history. |
+| `24 current management rows` | Each property has exactly one open interval with `valid_to IS NULL`, representing its current manager. |
+
+These counts do not mean 25 observations were deleted. Their evidence is retained
+through `source_observation_count` on the reconstructed interval.
+
+Important examples:
+
+```text
+P01: C01 -> C02 -> C01
+```
+
+The final `C01` is a new interval, not a continuation of the first one.
+
+For `P03`, management changes at exactly:
+
+```text
+2026-03-29T13:00:00Z
+```
+
+The interval rule is:
+
+```text
+valid_from <= business_time < valid_to
+```
+
+so:
+
+```text
+12:59 -> C02
+13:00 -> C03
+```
+
+### Run
+
+```powershell
+python -m src.build_management_history
+```
+
+Then:
+
+```powershell
+python -m pytest tests/test_management_history.py -q
+python -m pytest -q
+```
+
+The same cumulative:
+
+```text
+reports/Report.txt
+```
+
+is extended with all intervals, the P01 history, P03 boundary proof and current
+management lookup.
+
+The Pipeline Explorer also provides an editable historical-management lookup for a property in either **exact-time** mode or **time-range** mode. Exact mode returns the interval containing one timestamp; range mode returns every management interval overlapping the requested `[from_time, to_time)` window.
+
+### Validation / tests
+
+```text
+Stage-specific tests: 10 passed
+Cumulative tests after Stage 7: 60 passed
+```
+
+The tests cover the 62-to-37 interval reconstruction, one current manager per
+property, P01 `C01 -> C02 -> C01`, P03 exact transfer boundary, incident
+attribution, positive interval duration, idempotent rebuild and audit-report
+evidence.
+
+### Boundary
+
+Stage 7 answers:
+
+> Who managed this property at a particular business time?
+
+Stage 8 uses that answer to build visit and incident facts and assign the correct
+historical company to every reportable activity record.
+
+---
+
+## Stage 8 — Analytical visit and incident facts
+
+### Aim
+
+Stage 8 turns the cleaned latest visit state and incident source into analytics-ready
+facts. Each reportable visit becomes exactly one `fact_visits` row and each
+incident becomes exactly one `fact_incidents` row. The stage assigns the company
+that managed the property when the activity happened, converts the business time
+into the property's IANA timezone to determine the correct local Monday reporting
+week, and calculates completed visit duration from elapsed UTC time so daylight
+saving does not distort hours. Visits and incidents intentionally stay as separate
+fact grains because the source provides no direct key between them.
+
+### Questions answered
+
+- Which managing company was responsible when each visit or incident occurred?
+- Which local reporting week does each activity record belong to?
+- How many elapsed hours did a completed visit actually last?
+- How are unfinished visits represented?
+- Which otherwise-valid records fall outside the six requested report weeks?
+- Can visits and incidents be combined later without creating row multiplication?
+
+### How this stage solves them
+
+`src/build_analytical_facts.py` joins reportable visits and incidents separately to
+property timezone and historical management intervals. It derives local timestamps,
+Monday week labels and requested-week flags, then materialises `fact_visits` and
+`fact_incidents`. Visit duration uses the difference between the original
+`TIMESTAMPTZ` instants rather than local wall-clock timestamps.
+
+### Deterministic date/time settings
+
+Every DuckDB connection explicitly uses:
+
+```text
+TimeZone = UTC
+Calendar = gregorian
+```
+
+This prevents the machine's regional/calendar settings from changing timestamp
+display or local-week calculations. Property-local conversion is still performed
+explicitly with each property's IANA timezone (for example
+`Pacific/Auckland` or `Australia/Sydney`).
+
+### Why this stage exists
+
+The final report needs reliable business facts, not raw events or current-state
+tables. Historical company attribution, local-week logic and elapsed duration are
+all business rules that should be resolved once in the analytical layer rather
+than repeatedly inside charts. Keeping the visit and incident facts separate also
+prevents accidental many-to-many fanout before aggregation.
+
+### New model objects
+
+| Object | Grain | Purpose |
+| --- | --- | --- |
+| `fact_visits` | One reportable current visit | Historical company, local week, visitor/contractor and completed-hours analytics |
+| `fact_incidents` | One incident | Historical company, local week and severity analytics |
+
+### Expected results
+
+```text
+Visit facts total                    1564
+Visits in requested local weeks      1543
+Visits outside requested weeks         21
+
+Incident facts total                  247
+Incidents in requested local weeks    246
+Incidents outside requested weeks       1
+```
+
+Requested-week sanity metrics:
+
+```text
+Visit count                 1543
+Distinct visitors            259
+Completed visit hours     2053.50
+Unfinished visits              91
+Incident count                246
+High-severity incidents        31
+```
+
+### Important proofs
+
+Historical management:
+
+```text
+V09 / I07 at 12:59 -> C02
+V10 / I06 at 13:00 -> C03
+```
+
+Property-local Monday boundary:
+
+```text
+V14 -> local Sunday 23:59 -> week 2026-03-16
+V01 -> local Monday 00:00 -> week 2026-03-23
+```
+
+DST elapsed duration:
+
+```text
+V07 / V16
+local wall clock: 02:30 -> 03:30
+elapsed UTC time: 2.00 hours
+```
+
+### Run
+
+```powershell
+python -m src.build_analytical_facts
+```
+
+Then:
+
+```powershell
+python -m pytest tests/test_analytical_facts.py -q
+python -m pytest -q
+```
+
+The cumulative `reports/Report.txt` is extended with fact counts, requested-week
+metrics, historical-company proof, local-week proof and DST-duration proof.
+
+The Pipeline Explorer adds editable analytical drill-downs for:
+- property + time range, showing historically attributed visit/incident facts;
+- historical company + time range, showing property, visit, visitor, contractor, status and completed hours;
+- contractor + time range, showing property, historical company, visit, visitor, status and completed hours;
+- completed, unfinished and outside-request-period fact inspection.
+
+### Validation / tests
+
+Stage 8 has 11 stage-specific tests covering fact grains/counts, requested
+weeks, historical company attribution, local week boundaries, DST elapsed hours,
+unfinished visits, requested-week metrics, idempotent rebuild and audit evidence.
+
+Confirmed at the Stage 8 checkpoint:
+
+```text
+Stage 8 tests: 11 passed
+Cumulative tests after Stage 8: 71 passed
+```
+
+### Boundary
+
+Stage 8 answers:
+
+> What are the trustworthy visit and incident facts used for reporting?
+
+Stage 9 aggregates those facts independently into company/week, property/week and
+contractor reporting marts.
+
+---
+
+
+## Stage 9 — Reporting marts
+
+### Aim
+
+Stage 9 converts the trustworthy Stage 8 facts into small reporting tables at the
+exact grains needed by the operations report. Rather than making charts repeatedly
+join and aggregate raw facts, this stage computes company/week, company-period,
+property/week and contractor metrics once with documented rules. Visits and
+incidents are aggregated separately before metrics are combined, distinct visitors
+are recalculated at each display grain, and a full property/week scaffold keeps
+weeks with no activity visible.
+
+### Questions answered
+
+- What is the weekly activity trend for each managing company?
+- What are each company's totals across the full requested period?
+- Does every property appear for every requested week, including zero activity?
+- Which contractors account for visit activity?
+- Do mart totals reconcile to the Stage 8 facts?
+- Why can distinct visitors not be added across companies or weeks?
+
+### How this stage solves them
+
+`src/build_reporting_marts.py` builds explicit scaffolds and independently
+aggregates `fact_visits` and `fact_incidents` before joining their metrics. It
+materialises `rpt_company_week`, `rpt_company_period`, `rpt_property_week` and
+`rpt_contractor`. Acceptance checks reconcile visit and incident totals before the
+transaction commits.
+
+### Why this stage exists
+
+The final report should consume stable, reviewable report grains instead of
+embedding complicated business logic inside charts. Pre-aggregation makes
+zero-activity rows explicit, prevents visit/incident fanout, keeps distinct counts
+correct and makes the final report easier to review and regenerate.
+
+### New model objects
+
+| Object | Grain | Purpose |
+| --- | --- | --- |
+| `rpt_company_week` | One company x requested week | Weekly company trend |
+| `rpt_company_period` | One company for the requested period | Period totals with direct distinct visitors |
+| `rpt_property_week` | One property x requested week | Property summary including zero activity |
+| `rpt_contractor` | One contractor for the requested period | Contractor visit breakdown |
+
+### Expected results
+
+```text
+Company/week rows                  18
+Company requested-period rows       3
+Property/week rows                144
+Contractor rows                     8
+Zero-activity property/week rows   22
+```
+
+Company-period checks:
+
+```text
+C01 Clover Management  514 visits  228 visitors  639.75 hours
+                       32 unfinished  89 incidents  8 high
+
+C02 Fern Management    511 visits  222 visitors  684.75 hours
+                       29 unfinished  83 incidents  14 high
+
+C03 Wattle Management  518 visits  223 visitors  729.00 hours
+                       30 unfinished  74 incidents  9 high
+```
+
+Top contractors by visit count:
+
+```text
+Field Crew 07   217
+Field Crew 02   208
+Field Crew 06   198
+```
+
+### Run
+
+```powershell
+python -m src.build_reporting_marts
+```
+
+Then:
+
+```powershell
+python -m pytest tests/test_reporting_marts.py -q
+python -m pytest -q
+```
+
+For a complete clean rebuild through Stage 9:
+
+```powershell
+python -m src.run_pipeline --fresh
+```
+
+### Validation / tests
+
+Stage 9 adds 12 stage-specific tests covering mart row counts, company totals,
+fact reconciliation, the 144-row property/week scaffold, 22 zero-activity rows,
+contractor totals/ranking, distinct-visitor non-additivity, idempotent rebuild and
+audit-report evidence.
+
+Expected cumulative suite after Stage 9:
+
+```text
+83 passed
+```
+
+### Boundary
+
+Stage 9 answers:
+
+> What stable aggregated datasets should the final operations report consume?
+
+Stage 10 renders these marts into the final viewable report and committed extracts.
+
+---
+
+## Stage 10 — Operations report and model extracts
+
+### Aim
+
+Stage 10 turns the validated reporting marts into the final artifact an operations
+manager or interviewer can open directly. The HTML report does not contain new
+business logic; it presents the already-tested Stage 9 metrics as KPIs, company
+trends, a complete property/week summary, contractor activity and data-quality/load
+evidence. It also records definitions, findings and limitations so the reader can
+understand both what the metrics show and what the supplied data cannot establish.
+Useful CSV extracts are generated alongside the report so reviewers can inspect the
+modelled outputs without opening DuckDB.
+
+### Questions answered
+
+- Can a reviewer see the required weekly operations metrics without querying the database?
+- Does the report include company trends, zero-activity property weeks and contractor activity?
+- Can the reader judge source/load quality and understand exclusions?
+- Are reporting definitions, period and latest successful batch explicit?
+- Are findings careful not to claim relationships or risk measures the data cannot support?
+- Can the final artifacts be regenerated from a fresh checkout?
+
+### How this stage solves them
+
+`src/generate_report.py` reads only the stable reporting marts and load/quality
+metadata, renders a self-contained Jinja2/Plotly HTML report and writes five CSV
+model extracts. `report_builds` records the successful report build. The cumulative
+`reports/Report.txt` gains a Stage 10 section. The pipeline runner is also made
+interview-friendly: before each stage it explains the aim and questions, after the
+stage it presents results and test coverage, then waits for Enter.
+
+### Why this stage exists
+
+The assignment requires a useful, viewable report and modelled extracts, not only
+correct database tables. Separating presentation from modelling keeps report code
+simple and ensures the charts cannot quietly redefine business rules already tested
+in SQL.
+
+### Generated artifacts
+
+```text
+reports/operations_report.html
+reports/extracts/company_week.csv
+reports/extracts/company_period.csv
+reports/extracts/property_week.csv
+reports/extracts/contractor.csv
+reports/extracts/data_quality_summary.csv
+```
+
+These artifacts should be committed to the final repository.
+
+### Run Stage 10
+
+```powershell
+python -m src.generate_report
+```
+
+Open:
+
+```text
+reports/operations_report.html
+```
+
+Then test:
+
+```powershell
+python -m pytest tests/test_report.py -q
+python -m pytest -q
+```
+
+### Validation / tests
+
+Stage 10 adds 8 report-generation tests covering the viewable HTML artifact,
+required KPIs, reporting period/latest batch, quality/load evidence, CSV extract
+row counts, findings/limitations, report-build metadata and regeneration.
+
+Confirmed locally:
+
+```text
+Stage 10 report tests: 8 passed
+Full regression suite: 91 passed
+```
+
+---
+
+## Stage 11 — CI and reproducibility
+
+### Aim
+
+Stage 11 proves that the finished project is not only correct on one laptop but
+can be rebuilt and validated automatically from a clean Git checkout. It adds a
+GitHub Actions workflow that installs dependencies on Python 3.11, verifies the
+immutable source data, rebuilds the complete Stage 1–10 pipeline without pauses,
+runs a final cross-layer acceptance check, executes the full pytest suite, confirms
+the committed raw data was not changed and uploads the generated report artifacts.
+No new business logic is introduced in this stage.
+
+### Questions answered
+
+- Can a fresh GitHub runner rebuild the complete project from committed sources?
+- Does the rebuilt repository produce the expected final model counts and artifacts?
+- Do all automated business-rule tests still pass outside the developer machine?
+- Does the pipeline leave the committed raw data unchanged?
+- Can reviewers retrieve the generated HTML, audit report and extracts from CI?
+
+### How this stage solves them
+
+`.github/workflows/ci.yml` defines the automated GitHub Actions job.
+`src/acceptance_check.py` verifies important counts across source, state,
+quality, history, fact, mart and report layers after the clean rebuild. The workflow
+then runs the full pytest suite and uploads the generated reporting artifacts.
+
+### Why this stage exists
+
+A reproducible data project should not depend on a developer's existing DuckDB
+file, terminal state or Windows configuration. Running the complete workflow on a
+fresh Linux runner demonstrates that committed source files plus code are enough
+to recreate the database models, report and validation results.
+
+### CI sequence
+
+```text
+GitHub push / pull request / manual run
+              |
+              v
+       Clean repository checkout
+              |
+              v
+         Python 3.11 setup
+              |
+              v
+       Install requirements.txt
+              |
+              v
+       Verify raw source integrity
+              |
+              v
+python -m src.run_pipeline --fresh --no-pause
+              |
+              v
+     Final acceptance check
+              |
+              v
+       Full pytest regression
+              |
+              v
+       Raw-data Git diff check
+              |
+              v
+       Upload report artifacts
+```
+
+### Local Stage 11 checks
+
+First run the acceptance gate against the already-built local project:
+
+```powershell
+python -m src.acceptance_check
+```
+
+Then run the Stage 11 configuration tests:
+
+```powershell
+python -m pytest tests/test_ci_reproducibility.py -q
+```
+
+Then run the complete suite:
+
+```powershell
+python -m pytest -q
+```
+
+Stage 11 adds **5 lightweight configuration tests**.
+
+Confirmed locally:
+
+```text
+Final acceptance check: passed
+Stage 11 tests: 5 passed
+Full regression suite: 96 passed
+```
+
+### GitHub Actions artifact
+
+A successful CI run publishes an artifact named:
+
+```text
+property-operations-report
+```
+
+containing:
+
+```text
+reports/operations_report.html
+reports/Report.txt
+reports/extracts/*.csv
+```
+
+### Boundary
+
+Stage 11 validates reproducibility and repository automation. It does not change
+the Stage 1–10 business definitions or reporting metrics.
+
+Stage 12 documents how this local design could scale in a production
+AWS/Snowflake environment.
+
+---
+
+## Stage 12 — Production-scale design
+
+### Aim
+
+Stage 12 explains how the same data-engineering rules could be operated at a much
+larger production scale, for example several million visit/event records, without
+pretending that the local DuckDB implementation itself is the production
+architecture. The design keeps the assignment's core guarantees — immutable raw
+evidence, idempotent event handling, per-visit source-version precedence,
+historical management attribution and separate analytical grains — while moving
+storage, ingestion, transformations and operations to cloud-managed services. It
+also covers security, monitoring, CI/CD, schema evolution, versioning and rollback.
+
+### Design questions addressed
+
+- What changes when the dataset grows from a few thousand rows to millions of records?
+- When is batch or micro-batch sufficient, and when is streaming justified?
+- Where would raw data, event history, current state, facts and marts live?
+- How would duplicate delivery, stale versions, replay and failure recovery work?
+- How would AWS/Snowflake access be secured?
+- Which infrastructure and data-quality metrics should be monitored?
+- How should continuous delivery promote tested changes after CI?
+- Which layers require explicit versioning: source records, events, code, infrastructure and schemas?
+- How should risky data-model changes be promoted and rolled back safely?
+
+### How this stage solves them
+
+`docs/PRODUCTION_DESIGN.md` proposes an S3-based immutable raw layer, queue-backed
+decoupled ingestion, lightweight serverless validation/orchestration, incremental
+Snowflake loading and SQL/dbt transformations. It documents security, monitoring,
+CI/CD, schema/data-contract versioning, rollback and concise interview answers.
+
+### Why this stage exists
+
+The take-home intentionally uses a small local database, but the first interview
+also raised the question of much larger operational datasets. The local model's correctness rules still apply at scale while the execution
+architecture changes. The production design therefore focuses on scalability and
+operability without making assumptions about Onside's actual production
+infrastructure.
+
+### Proposed architecture
+
+```text
+Applications / APIs / exports
+            |
+            v
+       Amazon S3 raw
+            |
+            v
+       SQS / routing
+            |
+            v
+   Lambda orchestration
+            |
+            v
+ Snowflake RAW / staging
+            |
+            v
+   SQL / dbt models
+            |
+            v
+ facts -> marts -> BI/report
+```
+
+For file-based near-real-time loading, Snowpipe can load from S3 event
+notifications. For periodic data, scheduled/bulk loading may be simpler.
+
+### Scaling principle
+
+```text
+Scale the execution,
+not the business rules.
+```
+
+Millions of records alone does not require Kafka/Spark/Kubernetes. The decision
+should be based on arrival rate, latency SLA, concurrency, replay needs and number
+of consumers.
+
+### Security
+
+The document covers:
+
+```text
+least-privilege IAM
+S3 Block Public Access
+encryption / KMS where appropriate
+Secrets Manager
+environment separation
+Snowflake RBAC
+masking / row-access controls where needed
+audit logging
+```
+
+### Monitoring
+
+The proposed monitoring covers both systems and data:
+
+```text
+SQS backlog / oldest-message age / DLQ
+Lambda errors / duration / throttles
+source arrival and freshness
+Snowflake load/query/task failures and cost
+technical reject rate
+duplicate/stale event rates
+business-quality issue rate
+row-count reconciliation
+report freshness
+```
+
+### CI/CD and versioning
+
+The design distinguishes:
+
+```text
+source_version  -> business-record precedence
+event_id        -> idempotent event identity
+Git SHA/tag     -> deployed code version
+schema_version  -> event/data contract
+IaC version     -> cloud infrastructure definition
+```
+
+CI validates a change; CD promotes that tested version through environments with
+appropriate gates and rollback.
+
+### Document
+
+```text
+docs/PRODUCTION_DESIGN.md
+```
+
+This file contains the detailed reference architecture, operational controls and design rationale.
+
+---
 
 ---
 
@@ -461,6 +1935,11 @@ For CI or a clean rebuild without pauses, use the unattended form:
 ```powershell
 python -m src.run_pipeline --fresh --no-pause
 ```
+
+Both local full-pipeline modes print one complete evidence section per stage rather than
+repeating a compact summary and then the same detailed table again. At the end of a
+successful local Stage 10 run, the generated HTML operations report opens automatically
+in the default browser. Browser launch is skipped in CI/headless environments.
 
 ### Mode 3 — Run an individual stage
 
